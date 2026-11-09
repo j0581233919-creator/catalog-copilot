@@ -1,0 +1,5 @@
+sku,title_en,title_ar,price,currency,stock_quantity,is_active,discount_percent,discount_price,offer_description_en,offer_description_ar,category
+TECH-PHN-01,Flagship 5G Smartphone 256GB,هاتف ذكي رائد يدعم الجيل الخامس 256 جيجا,3499.00,SAR,25,True,10.0,3149.10,Special Ramadan 10% discount,خصم خاص بمناسبة رمضان 10%,Electronics
+TECH-EAR-02,Active Noise Cancelling Earbuds,سماعات لاسلكية عازلة للضوضاء المحيطة,499.00,SAR,80,True,0.0,,Standard Retail,سعر التجزئة المعتمد,Audio
+TECH-TAB-03,Pro Tablet 11-inch with Stylus,جهاز لوحي احترافي 11 بوصة مع قلم ذكي,2199.00,SAR,0,True,0.0,,Sold out - restocking soon,نفذت الكمية - في انتظار الشحنة,Electronics
+OFF-CHR-04,Ergonomic Executive Mesh Chair,كرسي مكتبي مريح للظهر قابل للتعديل,850.00,SAR,12,True,15.0,722.50,15% Office Upgrade Special,عرض ترقية المكاتب بخصم 15%,Furniture

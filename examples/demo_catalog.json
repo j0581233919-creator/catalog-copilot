@@ -1,0 +1,42 @@
+{
+  "catalog_version": "1.0",
+  "currency": "SAR",
+  "items": [
+    {
+      "sku": "TECH-PHN-01",
+      "title_en": "Flagship 5G Smartphone 256GB",
+      "title_ar": "هاتف ذكي رائد يدعم الجيل الخامس 256 جيجا",
+      "price": 3499.00,
+      "currency": "SAR",
+      "stock_quantity": 25,
+      "is_active": true,
+      "discount_percent": 10.0,
+      "discount_price": 3149.10,
+      "offer_description_en": "Special Ramadan 10% discount",
+      "offer_description_ar": "خصم خاص بمناسبة رمضان 10%",
+      "category": "Electronics"
+    },
+    {
+      "sku": "TECH-EAR-02",
+      "title_en": "Active Noise Cancelling Earbuds",
+      "title_ar": "سماعات لاسلكية عازلة للضوضاء المحيطة",
+      "price": 499.00,
+      "currency": "SAR",
+      "stock_quantity": 80,
+      "is_active": true,
+      "discount_percent": 0.0,
+      "category": "Audio"
+    },
+    {
+      "sku": "TECH-TAB-03",
+      "title_en": "Pro Tablet 11-inch with Stylus",
+      "title_ar": "جهاز لوحي احترافي 11 بوصة مع قلم ذكي",
+      "price": 2199.00,
+      "currency": "SAR",
+      "stock_quantity": 0,
+      "is_active": true,
+      "discount_percent": 0.0,
+      "category": "Electronics"
+    }
+  ]
+}
