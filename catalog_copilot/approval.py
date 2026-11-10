@@ -245,6 +245,18 @@ class ApprovalLedger:
                     SELECT RAISE(ABORT, 'Security Invariant: audit_log records are immutable and cannot be deleted.');
                 END;
             """)
+
+            # Chatwoot Webhook Event Idempotency Table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chatwoot_events (
+                    event_key TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    draft_id TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
             conn.commit()
 
     def _log_audit_event(
@@ -962,6 +974,58 @@ class ApprovalLedger:
                 }
                 for r in rows
             ]
+
+    def record_chatwoot_event(
+        self,
+        event_key: str,
+        conversation_id: Union[int, str],
+        message_id: Union[int, str],
+        draft_id: Optional[str],
+        status: str,
+    ) -> bool:
+        """Atomically records a Chatwoot webhook event for idempotency tracking.
+        Returns True if newly recorded, False if already present (duplicate).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO chatwoot_events (event_key, conversation_id, message_id, draft_id, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(event_key), str(conversation_id), str(message_id), draft_id, status, now),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def is_chatwoot_event_processed(self, event_key: str) -> bool:
+        """Checks if a Chatwoot webhook event has already been processed."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT 1 FROM chatwoot_events WHERE event_key = ?", (str(event_key),))
+            return cursor.fetchone() is not None
+
+    def get_latest_draft_for_conversation(self, conversation_id: Union[int, str]) -> Optional[DraftMessage]:
+        """Returns the most recent pending draft associated with a conversation."""
+        conv_str = str(conversation_id).strip()
+        lead_prefix = f"cw_conv_{conv_str}"
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM drafts
+                WHERE (lead_id = ? OR draft_id LIKE ?)
+                  AND approval_status = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (lead_prefix, f"cw_{conv_str}_%", ApprovalStatus.PENDING_REVIEW.value),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_draft(row)
 
     @staticmethod
     def _row_to_draft(row: sqlite3.Row) -> DraftMessage:

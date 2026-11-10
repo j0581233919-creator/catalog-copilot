@@ -18,6 +18,12 @@ from .generator import DraftGenerator
 from .approval import ApprovalLedger
 from .workflow import BatchWorkflowEngine
 from .tui import HumanReviewTUI, TerminalFormatter
+from .chatwoot import (
+    ChatwootApiClient,
+    ChatwootWebhookHandler,
+    MockChatwootTransport,
+    create_chatwoot_server,
+)
 
 __all__ = [
     "CatalogItem",
@@ -36,4 +42,8 @@ __all__ = [
     "BatchWorkflowEngine",
     "HumanReviewTUI",
     "TerminalFormatter",
+    "ChatwootApiClient",
+    "ChatwootWebhookHandler",
+    "MockChatwootTransport",
+    "create_chatwoot_server",
 ]

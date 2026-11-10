@@ -13,6 +13,7 @@ from .generator import DraftGenerator
 from .approval import ApprovalLedger
 from .workflow import BatchWorkflowEngine
 from .tui import HumanReviewTUI
+from .chatwoot import ChatwootApiClient, ChatwootWebhookHandler, create_chatwoot_server
 
 
 def cmd_validate_catalog(args: argparse.Namespace) -> int:
@@ -146,6 +147,40 @@ def cmd_tui(args: argparse.Namespace) -> int:
         return tui.run()
     except Exception as e:
         print(f"TUI error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_chatwoot(args: argparse.Namespace) -> int:
+    try:
+        path = Path(args.catalog)
+        catalog = CatalogLoader.load_json(path) if path.suffix.lower() == ".json" else CatalogLoader.load_csv(path)
+        ledger = ApprovalLedger(db_path=args.db)
+
+        api_client = None
+        if getattr(args, "chatwoot_url", None) and getattr(args, "api_token", None):
+            api_client = ChatwootApiClient(
+                base_url=args.chatwoot_url,
+                account_id=getattr(args, "account_id", 1),
+                api_access_token=args.api_token,
+            )
+
+        handler = ChatwootWebhookHandler(
+            catalog=catalog,
+            ledger=ledger,
+            api_client=api_client,
+            webhook_secret=getattr(args, "secret", None),
+        )
+
+        server = create_chatwoot_server(handler=handler, host=args.host, port=args.port)
+        print(f"Chatwoot webhook listener running on http://{args.host}:{args.port}/webhook (Press Ctrl+C to stop)")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down Chatwoot webhook server.")
+            server.server_close()
+        return 0
+    except Exception as e:
+        print(f"Chatwoot server error: {e}", file=sys.stderr)
         return 1
 
 
@@ -365,6 +400,18 @@ def main() -> None:
     # demo
     p_demo = subparsers.add_parser("demo", help="Run interactive verification demonstration")
     p_demo.set_defaults(func=cmd_demo)
+
+    # chatwoot-listener
+    p_cw = subparsers.add_parser("chatwoot-listener", help="Run standalone Chatwoot webhook HTTP listener")
+    p_cw.add_argument("--catalog", "-c", required=True, help="Path to catalog CSV/JSON")
+    p_cw.add_argument("--db", "-d", default="catalog_copilot.db", help="Path to SQLite queue DB")
+    p_cw.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
+    p_cw.add_argument("--port", "-p", type=int, default=8000, help="Server port (default: 8000)")
+    p_cw.add_argument("--secret", "-s", help="Optional webhook HMAC-SHA256 secret")
+    p_cw.add_argument("--chatwoot-url", help="Chatwoot base URL (e.g. https://app.chatwoot.com)")
+    p_cw.add_argument("--account-id", default=1, help="Chatwoot account ID")
+    p_cw.add_argument("--api-token", help="Chatwoot agent or bot API access token")
+    p_cw.set_defaults(func=cmd_chatwoot)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):
