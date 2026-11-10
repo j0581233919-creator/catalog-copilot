@@ -1,6 +1,7 @@
 """Data models for CatalogCopilot."""
 
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional, List, Dict, Any
@@ -28,6 +29,8 @@ class ApprovalStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     EDITED_AND_APPROVED = "EDITED_AND_APPROVED"
+    EXPORTED = "EXPORTED"
+    DISPATCHED = "DISPATCHED"
 
 
 @dataclass
@@ -48,11 +51,19 @@ class CatalogItem:
     def __post_init__(self):
         self.sku = str(self.sku).strip().upper()
         self.price = float(self.price)
+        if math.isnan(self.price) or math.isinf(self.price):
+            raise ValueError(f"SKU '{self.sku}' has non-finite price: {self.price}")
+
         self.currency = str(self.currency).strip().upper()
         self.stock_quantity = int(self.stock_quantity)
         self.discount_percent = float(self.discount_percent or 0.0)
+        if math.isnan(self.discount_percent) or math.isinf(self.discount_percent):
+            raise ValueError(f"SKU '{self.sku}' has non-finite discount percent: {self.discount_percent}")
+
         if self.discount_price is not None:
             self.discount_price = float(self.discount_price)
+            if math.isnan(self.discount_price) or math.isinf(self.discount_price):
+                raise ValueError(f"SKU '{self.sku}' has non-finite discount price: {self.discount_price}")
 
     @property
     def effective_price(self) -> float:
@@ -82,18 +93,38 @@ class LeadInquiry:
     preferred_language: str
     inquiry_text: str
     requested_sku: Optional[str] = None
+    consent_evidence: str = "Explicit opt-in documented in inquiry source"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def __post_init__(self):
         self.lead_id = str(self.lead_id).strip()
+        if not self.lead_id:
+            raise ValueError("Lead record is missing required 'lead_id'.")
+
         self.customer_name = str(self.customer_name).strip()
         self.contact_channel = str(self.contact_channel).strip().lower()
+        if self.contact_channel not in ("email", "whatsapp", "sms", "chat", "phone"):
+            raise ValueError(f"Unsupported or invalid contact channel: '{self.contact_channel}'.")
+
         self.contact_target = str(self.contact_target).strip()
-        # Enforce boolean consent strictly
-        if isinstance(self.consent_to_contact, str):
-            self.consent_to_contact = self.consent_to_contact.strip().lower() in ("true", "1", "yes", "y", "t")
-        else:
+        if not self.contact_target:
+            raise ValueError(f"Lead '{self.lead_id}' has empty contact target.")
+
+        # Strict documented boolean parsing for consent
+        if isinstance(self.consent_to_contact, bool):
+            pass
+        elif isinstance(self.consent_to_contact, str):
+            norm = self.consent_to_contact.strip().lower()
+            if norm in ("true", "1", "yes", "y"):
+                self.consent_to_contact = True
+            elif norm in ("false", "0", "no", "n", ""):
+                self.consent_to_contact = False
+            else:
+                raise ValueError(f"Invalid consent value '{self.consent_to_contact}'. Must be an explicit documented boolean.")
+        elif isinstance(self.consent_to_contact, (int, float)) and self.consent_to_contact in (0, 1):
             self.consent_to_contact = bool(self.consent_to_contact)
+        else:
+            raise ValueError(f"Invalid consent type {type(self.consent_to_contact)}. Must be an explicit documented boolean.")
 
         lang = str(self.preferred_language).strip().lower()
         self.preferred_language = "ar" if lang in ("ar", "arabic", "ar-sa", "ar-eg", "عربي") else "en"
@@ -168,6 +199,8 @@ class DraftMessage:
     subject: str
     body: str
     verification_report: VerificationReport
+    consent_to_contact: bool = False
+    consent_evidence: str = ""
     approval_status: ApprovalStatus = ApprovalStatus.PENDING_REVIEW
     reviewer_notes: Optional[str] = None
     reviewed_by: Optional[str] = None
@@ -186,6 +219,8 @@ class DraftMessage:
             "subject": self.subject,
             "body": self.body,
             "verification_report": self.verification_report.to_dict(),
+            "consent_to_contact": self.consent_to_contact,
+            "consent_evidence": self.consent_evidence,
             "approval_status": self.approval_status.value,
             "reviewer_notes": self.reviewer_notes,
             "reviewed_by": self.reviewed_by,
@@ -206,6 +241,8 @@ class DraftMessage:
             subject=data["subject"],
             body=data["body"],
             verification_report=VerificationReport.from_dict(data["verification_report"]),
+            consent_to_contact=bool(data.get("consent_to_contact", False)),
+            consent_evidence=data.get("consent_evidence", ""),
             approval_status=ApprovalStatus(data.get("approval_status", ApprovalStatus.PENDING_REVIEW.value)),
             reviewer_notes=data.get("reviewer_notes"),
             reviewed_by=data.get("reviewed_by"),

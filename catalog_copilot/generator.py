@@ -33,14 +33,16 @@ class DraftGenerator:
 
         item: Optional[CatalogItem] = None
         if sku:
+            # Explicit SKU requested: strictly lookup, never substitute with search
             item = catalog.get_item(sku)
-
-        # If SKU was not explicitly set in lead, attempt search by inquiry text
-        if item is None and lead.inquiry_text:
-            matches = catalog.search(lead.inquiry_text, lang=lead.preferred_language, limit=1)
-            if matches:
+        elif lead.inquiry_text:
+            # No SKU requested: search for unique product match
+            matches = catalog.search(lead.inquiry_text, lang=lead.preferred_language, limit=2)
+            if len(matches) == 1:
                 item = matches[0]
-                sku = item.sku
+            elif len(matches) > 1:
+                # Multiple matches (ambiguous query or tie): do not guess, require clarification
+                item = None
 
         # Generate bilingual content
         if lead.preferred_language == "ar":
@@ -69,7 +71,7 @@ class DraftGenerator:
             lead=lead,
             catalog=catalog,
             draft_text=body,
-            target_sku=item.sku if item else None,
+            target_sku=item.sku if item else lead.requested_sku,
         )
 
         return DraftMessage(
@@ -78,11 +80,13 @@ class DraftGenerator:
             customer_name=lead.customer_name,
             contact_channel=lead.contact_channel,
             contact_target=lead.contact_target,
-            sku=item.sku if item else None,
+            sku=item.sku if item else lead.requested_sku,
             language=lead.preferred_language,
             subject=subject,
             body=body,
             verification_report=report,
+            consent_to_contact=lead.consent_to_contact,
+            consent_evidence=lead.consent_evidence,
             approval_status=ApprovalStatus.PENDING_REVIEW,
         )
 
@@ -94,8 +98,8 @@ class DraftGenerator:
             subject = "بخصوص استفساركم التجاري"
             body = (
                 f"مرحباً {name}،\n\n"
-                f"نشكركم على تواصلكم واهتمامكم بمنتجاتنا. لقد استلمنا استفساركم: '{lead.inquiry_text}'.\n"
-                f"يرجى تزويدنا برمز المنتج المطلوب أو تفاصيل إضافية لنتمكن من خدمتكم بالدقة المطلوبة.\n\n"
+                f"نشكركم على تواصلكم واهتمامكم بمنتجاتنا. بخصوص استفساركم: '{lead.inquiry_text}'.\n"
+                f"يرجى تزويدنا برمز المنتج المطلوب (SKU) بدقة لنتمكن من تزويدكم بالأسعار وتفاصيل التوفر الرسمية.\n\n"
                 f"مع أطيب التحيات،\nفريق المبيعات"
             )
             return subject, body
@@ -106,8 +110,8 @@ class DraftGenerator:
             body = (
                 f"مرحباً {name}،\n\n"
                 f"نشكركم على اهتمامكم بمنتج {item.title_ar} (رمز المنتج: {item.sku}).\n"
-                f"نود إفادتكم بأن هذا المنتج غير متوفر حالياً في مستودعاتنا، ونعمل على إعادة توفيره قريباً.\n"
-                f"يمكننا إشعاركم فور توفر الشحنة القادمة إذا رغبتم في ذلك.\n\n"
+                f"نود إفادتكم بأن هذا المنتج غير متوفر حالياً في مستودعاتنا.\n"
+                f"يرجى إعلامنا إذا كنتم ترغبون في المساعدة باختيار منتج بديل متاح.\n\n"
                 f"مع خالص الشكر والتقدير،\nفريق المبيعات"
             )
             return subject, body
@@ -138,7 +142,7 @@ class DraftGenerator:
             body = (
                 f"Dear {name},\n\n"
                 f"Thank you for contacting us regarding: '{lead.inquiry_text}'.\n"
-                f"Could you please confirm the specific product SKU or title you are interested in so we can provide exact details?\n\n"
+                f"Could you please confirm the specific product SKU you are interested in so we can provide exact pricing and stock details?\n\n"
                 f"Best regards,\nSales Support Team"
             )
             return subject, body
@@ -149,8 +153,8 @@ class DraftGenerator:
             body = (
                 f"Dear {name},\n\n"
                 f"Thank you for your interest in {item.title_en} (SKU: {item.sku}).\n"
-                f"Currently, this item is out of stock in our inventory. We are working on restocking soon.\n"
-                f"Please let us know if you would like us to notify you once it becomes available.\n\n"
+                f"Currently, this item is out of stock in our inventory.\n"
+                f"Please let us know if we can assist you with an alternative available product.\n\n"
                 f"Best regards,\nSales Support Team"
             )
             return subject, body

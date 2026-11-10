@@ -120,7 +120,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     try:
         ledger = ApprovalLedger(db_path=args.db)
         engine = BatchWorkflowEngine(ledger=ledger)
-        count = engine.export_approved_to_csv(output_csv_path=args.output, mark_as_dispatched=not args.no_dispatch)
+        count = engine.export_approved_to_csv(output_csv_path=args.output, mark_as_exported=not args.no_dispatch)
         print(f"Exported {count} approved messages to {args.output}")
         return 0
     except Exception as e:
@@ -244,12 +244,18 @@ def cmd_demo(args: argparse.Namespace) -> int:
         rejected = ledger.reject(drafts[1].draft_id, reviewer="Supervisor Omar", reason="Wait for next week's container arrival before messaging.")
         print(f"  Rejected: {rejected.draft_id} for {rejected.customer_name}. Reason: {rejected.reviewer_notes}")
 
-        # Third lead cannot be approved because consent failed!
+        # Third lead cannot be approved OR edited-and-approved because consent failed!
         try:
             ledger.approve(drafts[2].draft_id, reviewer="Supervisor Omar")
             print("  ERROR: Lead without consent was unexpectedly approved!")
         except ValueError as err:
             print(f"  Blocked illegal approval as expected: {err}")
+
+        try:
+            ledger.edit_and_approve(drafts[2].draft_id, new_body="Hello", reviewer="Supervisor Omar", catalog=catalog)
+            print("  ERROR: Lead without consent was unexpectedly edited and approved!")
+        except ValueError as err:
+            print(f"  Blocked illegal edit-and-approval as expected: {err}")
 
         # 5. Export Approved
         dispatch_file = tmp_db_path.replace(".db", "_dispatch.csv")

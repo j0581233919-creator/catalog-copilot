@@ -16,22 +16,56 @@ class TestCatalog(unittest.TestCase):
             currency="SAR",
             stock_quantity=10,
             discount_percent=20.0,
+            discount_price=40.0,
         )
         self.assertEqual(item.sku, "TEA-01")
         self.assertEqual(item.effective_price, 40.0)
         self.assertTrue(item.in_stock)
 
-        # Item with explicit discount price
+        # Item with explicit discount price (consistent with 25% discount)
         item2 = CatalogItem(
             sku="TEA-02",
             title_en="Earl Grey Tea",
             title_ar="شاي إيرل غراي",
             price=60.0,
             stock_quantity=0,
+            discount_percent=25.0,
             discount_price=45.0,
         )
         self.assertEqual(item2.effective_price, 45.0)
         self.assertFalse(item2.in_stock)
+
+    def test_zero_price_allowed(self):
+        """MEDIUM REGRESSION: Numeric 0.0 is a valid promotional or free item price."""
+        data = [{"sku": "FREE-01", "title_en": "Sample", "title_ar": "عينة", "price": 0.0, "stock_quantity": 5}]
+        catalog = CatalogLoader.load_from_dict_list(data)
+        item = catalog.get_item("FREE-01")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.price, 0.0)
+
+    def test_non_finite_numbers_rejected(self):
+        """MEDIUM REGRESSION: NaN and Inf prices or discounts must be rejected."""
+        bad_nan = [{"sku": "NAN-1", "title_en": "A", "title_ar": "أ", "price": float("nan")}]
+        with self.assertRaises(ValueError):
+            CatalogLoader.load_from_dict_list(bad_nan)
+
+        bad_inf = [{"sku": "INF-1", "title_en": "A", "title_ar": "أ", "price": float("inf")}]
+        with self.assertRaises(ValueError):
+            CatalogLoader.load_from_dict_list(bad_inf)
+
+    def test_contradictory_discounts_rejected(self):
+        """HIGH REGRESSION: Contradictory discount_percent (10%) and discount_price (50 on base 100) must FAIL."""
+        bad_discount = [{
+            "sku": "BAD-DISC",
+            "title_en": "Mismatch",
+            "title_ar": "تناقض",
+            "price": 100.0,
+            "discount_percent": 10.0,  # implies 90.0
+            "discount_price": 50.0,     # contradicts 10%
+        }]
+        with self.assertRaises(ValueError) as ctx:
+            CatalogLoader.load_from_dict_list(bad_discount)
+        self.assertIn("contradictory discount_price", str(ctx.exception))
 
     def test_duplicate_sku_rejection(self):
         catalog = Catalog()
@@ -43,17 +77,14 @@ class TestCatalog(unittest.TestCase):
         self.assertIn("Duplicate SKU", str(ctx.exception))
 
     def test_arabic_normalization(self):
-        # Tashkeel removal and alef unification
         raw = "إِبْرِيقُ الشَّايِ"
         norm = normalize_arabic_text(raw)
         self.assertEqual(norm, "ابريق الشاي")
 
-        # Teh marbuta normalization
         raw2 = "قهوة سعودية"
         norm2 = normalize_arabic_text(raw2)
         self.assertEqual(norm2, "قهوه سعوديه")
 
-        # Arabic-Indic digit translation
         raw3 = "سعر ٤٥ ريال"
         norm3 = normalize_arabic_text(raw3)
         self.assertEqual(norm3, "سعر 45 ريال")

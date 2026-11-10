@@ -3,6 +3,7 @@
 from __future__ import annotations
 import csv
 import json
+import math
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
@@ -113,22 +114,30 @@ class CatalogLoader:
         if not title_en or not title_ar:
             raise ValueError(f"SKU '{sku}' is missing bilingual titles (title_en or title_ar).")
 
+        price_raw = row.get("price")
+        if price_raw is None or str(price_raw).strip() == "":
+            raise ValueError(f"Record at index {index} is missing required 'price' field.")
+
         try:
-            price_val = str(row.get("price") or "").translate(_ARABIC_INDIC_DIGITS)
+            price_val = str(price_raw).translate(_ARABIC_INDIC_DIGITS)
             price = float(price_val)
         except (ValueError, TypeError):
-            raise ValueError(f"SKU '{sku}' has invalid non-numeric price: {row.get('price')}")
+            raise ValueError(f"SKU '{sku}' has invalid non-numeric price: {price_raw}")
 
-        if price < 0:
-            raise ValueError(f"SKU '{sku}' has negative price: {price}. Price must be >= 0.")
+        if math.isnan(price) or math.isinf(price) or price < 0:
+            raise ValueError(f"SKU '{sku}' has invalid non-finite or negative price: {price}. Price must be >= 0.")
 
         currency = str(row.get("currency") or "SAR").strip().upper()
 
-        try:
-            stock_val = str(row.get("stock_quantity") if row.get("stock_quantity") is not None else 0).translate(_ARABIC_INDIC_DIGITS)
-            stock = int(stock_val)
-        except (ValueError, TypeError):
-            raise ValueError(f"SKU '{sku}' has invalid stock quantity: {row.get('stock_quantity')}")
+        stock_raw = row.get("stock_quantity")
+        if stock_raw is None or str(stock_raw).strip() == "":
+            stock = 0
+        else:
+            try:
+                stock_val = str(stock_raw).translate(_ARABIC_INDIC_DIGITS)
+                stock = int(stock_val)
+            except (ValueError, TypeError):
+                raise ValueError(f"SKU '{sku}' has invalid stock quantity: {stock_raw}")
 
         if stock < 0:
             raise ValueError(f"SKU '{sku}' has negative stock: {stock}. Stock must be >= 0.")
@@ -147,7 +156,7 @@ class CatalogLoader:
                 discount_percent = float(str(row["discount_percent"]).translate(_ARABIC_INDIC_DIGITS))
             except ValueError:
                 raise ValueError(f"SKU '{sku}' has invalid discount percent: {row.get('discount_percent')}")
-            if not (0.0 <= discount_percent <= 100.0):
+            if math.isnan(discount_percent) or math.isinf(discount_percent) or not (0.0 <= discount_percent <= 100.0):
                 raise ValueError(f"SKU '{sku}' discount percent {discount_percent} out of range [0, 100].")
 
         # Discount price
@@ -157,8 +166,17 @@ class CatalogLoader:
                 discount_price = float(str(row["discount_price"]).translate(_ARABIC_INDIC_DIGITS))
             except ValueError:
                 raise ValueError(f"SKU '{sku}' has invalid discount price: {row.get('discount_price')}")
-            if discount_price < 0 or discount_price > price:
+            if math.isnan(discount_price) or math.isinf(discount_price) or discount_price < 0 or discount_price > price:
                 raise ValueError(f"SKU '{sku}' discount price {discount_price} must be between 0 and standard price {price}.")
+
+        # Check mathematical consistency between discount price and percent
+        if discount_percent > 0 and discount_price is not None:
+            expected_price = round(price * (1.0 - (discount_percent / 100.0)), 2)
+            if abs(discount_price - expected_price) > 0.50:
+                raise ValueError(
+                    f"SKU '{sku}' has contradictory discount_price ({discount_price}) and discount_percent ({discount_percent}%). "
+                    f"Expected discount price was {expected_price}."
+                )
 
         return CatalogItem(
             sku=sku,
@@ -192,6 +210,12 @@ class CatalogLoader:
         records = []
         with open(path, mode="r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
+            # Validate required headers
+            required_headers = {"sku", "title_en", "title_ar", "price"}
+            if not reader.fieldnames or not required_headers.issubset(set(reader.fieldnames)):
+                missing = required_headers - set(reader.fieldnames or [])
+                raise ValueError(f"Catalog CSV is missing required headers: {missing}")
+
             for row in reader:
                 records.append(row)
         return cls.load_from_dict_list(records)

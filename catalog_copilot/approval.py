@@ -38,12 +38,14 @@ class ApprovalLedger:
                     draft_id TEXT PRIMARY KEY,
                     lead_id TEXT NOT NULL,
                     customer_name TEXT,
-                    contact_channel TEXT,
-                    contact_target TEXT,
+                    contact_channel TEXT NOT NULL,
+                    contact_target TEXT NOT NULL,
                     sku TEXT,
-                    language TEXT,
-                    subject TEXT,
-                    body TEXT,
+                    language TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    consent_to_contact INTEGER NOT NULL,
+                    consent_evidence TEXT,
                     verification_status TEXT NOT NULL,
                     verification_report_json TEXT NOT NULL,
                     approval_status TEXT NOT NULL,
@@ -62,7 +64,7 @@ class ApprovalLedger:
                     action TEXT NOT NULL,
                     actor TEXT NOT NULL,
                     previous_status TEXT,
-                    new_status TEXT,
+                    new_status TEXT NOT NULL,
                     details_json TEXT,
                     timestamp TEXT NOT NULL
                 )
@@ -98,16 +100,30 @@ class ApprovalLedger:
         )
 
     def save_draft(self, draft: DraftMessage) -> None:
-        """Stores or updates a draft in the database."""
+        """Stores a new draft. Prevents silently replacing approved or dispatched records."""
         with self._get_connection() as conn:
+            cursor = conn.execute("SELECT approval_status FROM drafts WHERE draft_id = ?", (draft.draft_id,))
+            row = cursor.fetchone()
+            if row:
+                existing_status = row["approval_status"]
+                if existing_status in (
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.EDITED_AND_APPROVED.value,
+                    ApprovalStatus.EXPORTED.value,
+                    ApprovalStatus.DISPATCHED.value,
+                ):
+                    raise ValueError(
+                        f"Cannot overwrite draft '{draft.draft_id}': already finalized in status '{existing_status}'."
+                    )
+
             conn.execute(
                 """
                 INSERT OR REPLACE INTO drafts (
                     draft_id, lead_id, customer_name, contact_channel, contact_target,
-                    sku, language, subject, body, verification_status,
-                    verification_report_json, approval_status, reviewer_notes,
-                    reviewed_by, reviewed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sku, language, subject, body, consent_to_contact, consent_evidence,
+                    verification_status, verification_report_json, approval_status,
+                    reviewer_notes, reviewed_by, reviewed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.draft_id,
@@ -119,6 +135,8 @@ class ApprovalLedger:
                     draft.language,
                     draft.subject,
                     draft.body,
+                    1 if draft.consent_to_contact else 0,
+                    draft.consent_evidence,
                     draft.verification_report.status.value,
                     json.dumps(draft.verification_report.to_dict(), ensure_ascii=False),
                     draft.approval_status.value,
@@ -137,6 +155,7 @@ class ApprovalLedger:
                 new_status=draft.approval_status.value,
                 details={
                     "verification_status": draft.verification_report.status.value,
+                    "consent_to_contact": draft.consent_to_contact,
                     "reasons": draft.verification_report.reasons,
                 },
             )
@@ -159,7 +178,7 @@ class ApprovalLedger:
             return [self._row_to_draft(row) for row in cursor.fetchall()]
 
     def approve(self, draft_id: str, reviewer: str, notes: Optional[str] = None) -> DraftMessage:
-        """Approves a draft for outbound dispatch."""
+        """Approves a draft for outbound dispatch. Enforces predecessor state and full verification PASS."""
         reviewer = str(reviewer or "").strip()
         if not reviewer:
             raise ValueError("Reviewer identity is required to approve drafts.")
@@ -172,11 +191,23 @@ class ApprovalLedger:
 
             draft = self._row_to_draft(row)
 
-            # Safety guardrail: cannot approve a draft that critically failed verification (e.g. consent violation or out of stock)
-            if draft.verification_report.status == VerificationStatus.FAIL:
+            # Predecessor state check: only PENDING_REVIEW can be approved
+            if draft.approval_status != ApprovalStatus.PENDING_REVIEW:
                 raise ValueError(
-                    f"Cannot approve draft '{draft_id}': Failed commercial claim or consent verification. "
-                    f"Reasons: {'; '.join(draft.verification_report.reasons)}"
+                    f"Cannot approve draft '{draft_id}': current status is '{draft.approval_status.value}', must be '{ApprovalStatus.PENDING_REVIEW.value}'."
+                )
+
+            # Strict consent guardrail
+            if not draft.consent_to_contact:
+                raise ValueError(
+                    f"Cannot approve draft '{draft_id}': Customer has not granted opt-in contact consent. Outreach strictly prohibited."
+                )
+
+            # Strict verification guardrail: MUST be PASS (neither FAIL nor UNCERTAIN allowed)
+            if draft.verification_report.status != VerificationStatus.PASS:
+                raise ValueError(
+                    f"Cannot approve draft '{draft_id}': Verification status is '{draft.verification_report.status.value}'. "
+                    f"Only verified PASS drafts may be approved. Reasons: {'; '.join(draft.verification_report.reasons)}"
                 )
 
             now = datetime.now(timezone.utc).isoformat()
@@ -198,7 +229,7 @@ class ApprovalLedger:
                 actor=reviewer,
                 previous_status=prev_status,
                 new_status=new_status,
-                details={"notes": notes},
+                details={"notes": notes, "verification_status": draft.verification_report.status.value},
             )
             conn.commit()
 
@@ -224,6 +255,12 @@ class ApprovalLedger:
                 raise KeyError(f"Draft '{draft_id}' not found.")
 
             draft = self._row_to_draft(row)
+
+            if draft.approval_status not in (ApprovalStatus.PENDING_REVIEW,):
+                raise ValueError(
+                    f"Cannot reject draft '{draft_id}': current status is '{draft.approval_status.value}'."
+                )
+
             prev_status = draft.approval_status.value
             new_status = ApprovalStatus.REJECTED.value
             now = datetime.now(timezone.utc).isoformat()
@@ -261,7 +298,9 @@ class ApprovalLedger:
         catalog: Catalog,
         notes: Optional[str] = None,
     ) -> DraftMessage:
-        """Applies manual human edits and verifies them deterministically before approval."""
+        """Applies manual human edits and verifies them deterministically.
+        Strictly preserves the original customer consent status.
+        """
         reviewer = str(reviewer or "").strip()
         new_body = str(new_body or "").strip()
         if not reviewer:
@@ -277,17 +316,29 @@ class ApprovalLedger:
 
             draft = self._row_to_draft(row)
 
-            # Reconstruct lead object for verification
+            # Predecessor state check
+            if draft.approval_status != ApprovalStatus.PENDING_REVIEW:
+                raise ValueError(
+                    f"Cannot edit and approve draft '{draft_id}': status is '{draft.approval_status.value}', must be '{ApprovalStatus.PENDING_REVIEW.value}'."
+                )
+
+            # Strict consent preservation: If lead had no consent, editing CANNOT bypass it!
+            if not draft.consent_to_contact:
+                raise ValueError(
+                    f"Cannot edit and approve draft '{draft_id}': Customer has not granted opt-in contact consent. Outreach strictly prohibited."
+                )
+
             from .models import LeadInquiry
             lead = LeadInquiry(
                 lead_id=draft.lead_id,
                 customer_name=draft.customer_name,
                 contact_channel=draft.contact_channel,
                 contact_target=draft.contact_target,
-                consent_to_contact=True,  # will be verified
+                consent_to_contact=draft.consent_to_contact,
                 preferred_language=draft.language,
                 inquiry_text="",
                 requested_sku=draft.sku,
+                consent_evidence=draft.consent_evidence,
             )
 
             # Deterministically re-verify edited body
@@ -298,9 +349,9 @@ class ApprovalLedger:
                 target_sku=draft.sku,
             )
 
-            if new_report.status == VerificationStatus.FAIL:
+            if new_report.status != VerificationStatus.PASS:
                 raise ValueError(
-                    f"Edited message failed deterministic verification: {'; '.join(new_report.reasons)}"
+                    f"Edited message failed deterministic verification ({new_report.status.value}): {'; '.join(new_report.reasons)}"
                 )
 
             now = datetime.now(timezone.utc).isoformat()
@@ -336,6 +387,7 @@ class ApprovalLedger:
                     "original_body": draft.body,
                     "new_body": new_body,
                     "notes": notes,
+                    "verification_status": new_report.status.value,
                 },
             )
             conn.commit()
@@ -349,32 +401,68 @@ class ApprovalLedger:
             return draft
 
     def get_approved_for_dispatch(self) -> List[DraftMessage]:
-        """Returns only drafts that have been approved and not yet marked as dispatched."""
+        """Returns only drafts that are strictly approved, consented, verified PASS, and unexported."""
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
                 SELECT * FROM drafts
-                WHERE approval_status IN (?, ?) AND is_dispatched = 0
+                WHERE approval_status IN (?, ?)
+                  AND is_dispatched = 0
+                  AND consent_to_contact = 1
+                  AND verification_status = 'PASS'
                 ORDER BY reviewed_at ASC
                 """,
                 (ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
             )
             return [self._row_to_draft(row) for row in cursor.fetchall()]
 
+    def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> None:
+        """Atomically transitions approved drafts to EXPORTED in a single transaction."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            for draft_id in draft_ids:
+                conn.execute(
+                    """
+                    UPDATE drafts
+                    SET approval_status = ?, is_dispatched = 0
+                    WHERE draft_id = ? AND approval_status IN (?, ?)
+                    """,
+                    (
+                        ApprovalStatus.EXPORTED.value,
+                        draft_id,
+                        ApprovalStatus.APPROVED.value,
+                        ApprovalStatus.EDITED_AND_APPROVED.value,
+                    ),
+                )
+                self._log_audit_event(
+                    conn=conn,
+                    draft_id=draft_id,
+                    action="EXPORTED",
+                    actor="System/DispatchExporter",
+                    previous_status="APPROVED",
+                    new_status="EXPORTED",
+                    details={"batch_manifest_id": batch_manifest_id},
+                )
+            conn.commit()
+
     def mark_dispatched(self, draft_id: str) -> None:
-        """Marks an approved draft as dispatched in audit ledger."""
+        """Marks an exported or approved draft as dispatched upon delivery confirmation."""
         now = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
             conn.execute(
-                "UPDATE drafts SET is_dispatched = 1, dispatched_at = ? WHERE draft_id = ?",
-                (now, draft_id),
+                """
+                UPDATE drafts
+                SET is_dispatched = 1, dispatched_at = ?, approval_status = ?
+                WHERE draft_id = ?
+                """,
+                (now, ApprovalStatus.DISPATCHED.value, draft_id),
             )
             self._log_audit_event(
                 conn=conn,
                 draft_id=draft_id,
                 action="DISPATCHED",
-                actor="System/DispatchExporter",
-                previous_status="APPROVED",
+                actor="System/DeliveryWorker",
+                previous_status="EXPORTED",
                 new_status="DISPATCHED",
             )
             conn.commit()
@@ -394,6 +482,8 @@ class ApprovalLedger:
             subject=row["subject"] or "",
             body=row["body"] or "",
             verification_report=report,
+            consent_to_contact=bool(row["consent_to_contact"]),
+            consent_evidence=row["consent_evidence"] or "",
             approval_status=ApprovalStatus(row["approval_status"]),
             reviewer_notes=row["reviewer_notes"],
             reviewed_by=row["reviewed_by"],

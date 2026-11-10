@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 import csv
+import os
+import tempfile
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
 from .models import (
@@ -26,21 +29,41 @@ class BatchWorkflowEngine:
 
     @staticmethod
     def parse_leads_csv(filepath: Union[str, Path]) -> List[LeadInquiry]:
-        """Parses and validates authorized synthetic or real customer inquiry leads from CSV."""
+        """Parses and strictly validates customer inquiry leads from CSV."""
         path = Path(filepath)
         if not path.is_file():
             raise FileNotFoundError(f"Leads CSV file not found: {path}")
 
+        required_headers = {"lead_id", "contact_channel", "contact_target", "inquiry_text"}
         leads: List[LeadInquiry] = []
+
         with open(path, mode="r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            if not reader.fieldnames or not required_headers.issubset(set(reader.fieldnames)):
+                missing = required_headers - set(reader.fieldnames or [])
+                raise ValueError(f"Leads CSV is missing required headers: {missing}")
+
+            for idx, row in enumerate(reader):
+                lead_id = str(row.get("lead_id") or "").strip()
+                if not lead_id:
+                    raise ValueError(f"Row {idx+1} is missing required 'lead_id'.")
+
+                contact_target = str(row.get("contact_target") or "").strip()
+                if not contact_target:
+                    raise ValueError(f"Lead '{lead_id}' has empty 'contact_target'.")
+
+                channel = str(row.get("contact_channel") or "email").strip().lower()
+                if channel not in ("email", "whatsapp", "sms", "chat", "phone"):
+                    raise ValueError(f"Lead '{lead_id}' has unsupported contact channel: '{channel}'.")
+
+                consent_raw = row.get("consent_to_contact", False)
+
                 lead = LeadInquiry(
-                    lead_id=row.get("lead_id", ""),
+                    lead_id=lead_id,
                     customer_name=row.get("customer_name", ""),
-                    contact_channel=row.get("contact_channel", "email"),
-                    contact_target=row.get("contact_target", ""),
-                    consent_to_contact=row.get("consent_to_contact", False),
+                    contact_channel=channel,
+                    contact_target=contact_target,
+                    consent_to_contact=consent_raw,
                     preferred_language=row.get("preferred_language", "ar"),
                     inquiry_text=row.get("inquiry_text", ""),
                     requested_sku=row.get("requested_sku") or None,
@@ -71,9 +94,10 @@ class BatchWorkflowEngine:
             "draft_ids": [],
         }
 
+        generated_drafts: List[DraftMessage] = []
         for lead in leads:
             draft = self.generator.generate_draft(lead=lead, catalog=catalog)
-            self.ledger.save_draft(draft)
+            generated_drafts.append(draft)
             results["draft_ids"].append(draft.draft_id)
             results["drafts_queued"] += 1
 
@@ -85,16 +109,26 @@ class BatchWorkflowEngine:
             else:
                 results["uncertain_verification"] += 1
 
+        # Persist all drafts to SQLite ledger
+        for draft in generated_drafts:
+            self.ledger.save_draft(draft)
+
         return results
 
     def export_approved_to_csv(
         self,
         output_csv_path: Union[str, Path],
-        mark_as_dispatched: bool = True,
+        mark_as_exported: bool = True,
     ) -> int:
-        """Exports approved drafts to a dispatch CSV for CRM or email delivery queues."""
+        """Atomically exports verified approved drafts to a dispatch CSV for CRM or email delivery queues.
+        Guarantees that a write failure never leaves a corrupt or truncated file.
+        """
         approved_drafts = self.ledger.get_approved_for_dispatch()
-        out_p = Path(output_csv_path)
+        if not approved_drafts:
+            return 0
+
+        out_p = Path(output_csv_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
 
         fieldnames = [
             "draft_id",
@@ -109,10 +143,18 @@ class BatchWorkflowEngine:
             "reviewed_by",
             "reviewed_at",
             "approval_status",
+            "consent_to_contact",
+            "consent_evidence",
         ]
 
-        with open(out_p, mode="w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+        batch_manifest_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"
+
+        # Write to temporary file in same directory first to ensure atomic rename
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="", dir=out_p.parent, delete=False
+        ) as tmp_file:
+            tmp_path = tmp_file.name
+            writer = csv.DictWriter(tmp_file, fieldnames=fieldnames)
             writer.writeheader()
             for draft in approved_drafts:
                 writer.writerow({
@@ -128,8 +170,20 @@ class BatchWorkflowEngine:
                     "reviewed_by": draft.reviewed_by or "",
                     "reviewed_at": draft.reviewed_at or "",
                     "approval_status": draft.approval_status.value,
+                    "consent_to_contact": 1 if draft.consent_to_contact else 0,
+                    "consent_evidence": draft.consent_evidence,
                 })
-                if mark_as_dispatched:
-                    self.ledger.mark_dispatched(draft.draft_id)
+
+        try:
+            # Atomic publish via file rename
+            os.replace(tmp_path, out_p)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+        if mark_as_exported:
+            draft_ids = [d.draft_id for d in approved_drafts]
+            self.ledger.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
 
         return len(approved_drafts)

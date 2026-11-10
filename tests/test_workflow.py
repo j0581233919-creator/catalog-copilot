@@ -17,12 +17,12 @@ class TestWorkflow(unittest.TestCase):
         self.leads_csv = os.path.join(self.tmp_dir.name, "leads.csv")
         self.output_csv = os.path.join(self.tmp_dir.name, "dispatch.csv")
 
-        # Create test catalog CSV
+        # Create test catalog CSV (with consistent 5.0% discount: 4500 * 0.95 = 4275.00)
         with open(self.catalog_csv, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["sku", "title_en", "title_ar", "price", "currency", "stock_quantity", "is_active", "discount_percent"])
-            writer.writerow(["LAPTOP-X1", "Laptop Pro 16", "حاسوب محمول برو 16", "4500.00", "SAR", "15", "True", "5.0"])
-            writer.writerow(["MOUSE-M1", "Wireless Mouse", "فأرة لاسلكية", "75.00", "SAR", "0", "True", "0.0"])
+            writer.writerow(["sku", "title_en", "title_ar", "price", "currency", "stock_quantity", "is_active", "discount_percent", "discount_price"])
+            writer.writerow(["LAPTOP-X1", "Laptop Pro 16", "حاسوب محمول برو 16", "4500.00", "SAR", "15", "True", "5.0", "4275.00"])
+            writer.writerow(["MOUSE-M1", "Wireless Mouse", "فأرة لاسلكية", "75.00", "SAR", "0", "True", "0.0", ""])
 
         # Create test leads CSV
         with open(self.leads_csv, "w", encoding="utf-8", newline="") as f:
@@ -41,7 +41,7 @@ class TestWorkflow(unittest.TestCase):
 
         stats = engine.process_batch(catalog_path=self.catalog_csv, leads_path=self.leads_csv)
         self.assertEqual(stats["total_leads"], 3)
-        self.assertEqual(stats["passed_verification"], 2)  # LEAD-01 (in-stock) and LEAD-02 (accurately notes out-of-stock)
+        self.assertEqual(stats["passed_verification"], 2)  # LEAD-01 and LEAD-02
         self.assertEqual(stats["failed_verification"], 1)  # LEAD-03 (fails consent)
 
         drafts = ledger.list_drafts()
@@ -61,7 +61,20 @@ class TestWorkflow(unittest.TestCase):
             self.assertEqual(rows[0]["lead_id"], "LEAD-01")
             self.assertEqual(rows[0]["customer_name"], "Hassan")
             self.assertEqual(rows[0]["sku"], "LAPTOP-X1")
+            self.assertEqual(rows[0]["consent_to_contact"], "1")
             self.assertIn("Laptop Pro 16", rows[0]["body"])
+
+    def test_malformed_csv_headers_rejected(self):
+        """MEDIUM REGRESSION: Leads CSV missing required headers must be rejected."""
+        bad_csv = os.path.join(self.tmp_dir.name, "bad_leads.csv")
+        with open(bad_csv, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["random_field", "another_field"])
+            w.writerow(["val1", "val2"])
+
+        with self.assertRaises(ValueError) as ctx:
+            BatchWorkflowEngine.parse_leads_csv(bad_csv)
+        self.assertIn("missing required headers", str(ctx.exception))
 
 
 if __name__ == "__main__":

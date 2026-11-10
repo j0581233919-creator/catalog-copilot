@@ -47,6 +47,13 @@ class TestApprovalLedger(unittest.TestCase):
             requires_human_intervention=True,
         )
 
+        self.uncertain_report = VerificationReport(
+            status=VerificationStatus.UNCERTAIN,
+            checks=[],
+            reasons=["Ungrounded commercial claim"],
+            requires_human_intervention=True,
+        )
+
     def tearDown(self):
         self.tmp_dir.cleanup()
 
@@ -62,6 +69,7 @@ class TestApprovalLedger(unittest.TestCase):
             subject="Phone inquiry",
             body="Smartphone is in stock for 1200.00 SAR.",
             verification_report=self.valid_report,
+            consent_to_contact=True,
         )
         self.ledger.save_draft(draft)
 
@@ -69,6 +77,7 @@ class TestApprovalLedger(unittest.TestCase):
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.customer_name, "Mona")
         self.assertEqual(retrieved.approval_status, ApprovalStatus.PENDING_REVIEW)
+        self.assertTrue(retrieved.consent_to_contact)
 
     def test_approve_draft(self):
         draft = DraftMessage(
@@ -82,6 +91,7 @@ class TestApprovalLedger(unittest.TestCase):
             subject="Phone inquiry",
             body="متوفر لدينا بسعر 1200.00 SAR.",
             verification_report=self.valid_report,
+            consent_to_contact=True,
         )
         self.ledger.save_draft(draft)
 
@@ -107,12 +117,33 @@ class TestApprovalLedger(unittest.TestCase):
             subject="Spam",
             body="Hello",
             verification_report=self.failed_report,
+            consent_to_contact=False,
         )
         self.ledger.save_draft(draft)
 
         with self.assertRaises(ValueError) as ctx:
             self.ledger.approve("D-003", reviewer="Agent Sarah")
-        self.assertIn("Failed commercial claim", str(ctx.exception))
+        self.assertIn("Customer has not granted opt-in contact consent", str(ctx.exception))
+
+    def test_cannot_approve_uncertain_draft(self):
+        draft = DraftMessage(
+            draft_id="D-UNCERT",
+            lead_id="L-99",
+            customer_name="Uncertain Lead",
+            contact_channel="email",
+            contact_target="uncert@example.com",
+            sku="PHONE-01",
+            language="en",
+            subject="Warranty question",
+            body="Comes with lifetime warranty",
+            verification_report=self.uncertain_report,
+            consent_to_contact=True,
+        )
+        self.ledger.save_draft(draft)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.ledger.approve("D-UNCERT", reviewer="Agent Sarah")
+        self.assertIn("Only verified PASS drafts may be approved", str(ctx.exception))
 
     def test_reject_draft(self):
         draft = DraftMessage(
@@ -126,12 +157,18 @@ class TestApprovalLedger(unittest.TestCase):
             subject="Special deal request",
             body="Priced at 1200.00 SAR.",
             verification_report=self.valid_report,
+            consent_to_contact=True,
         )
         self.ledger.save_draft(draft)
 
         rejected = self.ledger.reject("D-004", reviewer="Agent Sarah", reason="Customer requested credit terms not supported")
         self.assertEqual(rejected.approval_status, ApprovalStatus.REJECTED)
         self.assertEqual(rejected.reviewer_notes, "Customer requested credit terms not supported")
+
+        # Cannot approve an already rejected draft!
+        with self.assertRaises(ValueError) as ctx:
+            self.ledger.approve("D-004", reviewer="Agent Sarah")
+        self.assertIn("must be 'PENDING_REVIEW'", str(ctx.exception))
 
     def test_edit_and_approve_with_verification(self):
         draft = DraftMessage(
@@ -145,6 +182,7 @@ class TestApprovalLedger(unittest.TestCase):
             subject="Phone",
             body="Available now.",
             verification_report=self.valid_report,
+            consent_to_contact=True,
         )
         self.ledger.save_draft(draft)
 
@@ -155,13 +193,76 @@ class TestApprovalLedger(unittest.TestCase):
         self.assertEqual(edited.body, valid_edit)
 
         # Edit with price hallucination -> must raise ValueError!
-        invalid_edit = "Dear Layla, Smartphone 128GB (PHONE-01) is in stock for only 300.00 SAR!"
+        draft2 = DraftMessage(
+            draft_id="D-006",
+            lead_id="L-15",
+            customer_name="Ali",
+            contact_channel="email",
+            contact_target="ali@example.com",
+            sku="PHONE-01",
+            language="en",
+            subject="Phone",
+            body="Available now.",
+            verification_report=self.valid_report,
+            consent_to_contact=True,
+        )
+        self.ledger.save_draft(draft2)
+        invalid_edit = "Dear Ali, Smartphone 128GB (PHONE-01) is in stock for only 300.00 SAR!"
         with self.assertRaises(ValueError) as ctx:
-            self.ledger.edit_and_approve("D-005", new_body=invalid_edit, reviewer="Manager", catalog=self.catalog)
+            self.ledger.edit_and_approve("D-006", new_body=invalid_edit, reviewer="Manager", catalog=self.catalog)
         self.assertIn("failed deterministic verification", str(ctx.exception))
 
-    def test_dispatch_queue(self):
-        draft1 = DraftMessage(
+    def test_edit_cannot_bypass_no_consent(self):
+        """CRITICAL REGRESSION: Editing a draft with consent_to_contact=False must be strictly rejected."""
+        draft_no_consent = DraftMessage(
+            draft_id="D-NOCONSENT",
+            lead_id="L-NOCONSENT",
+            customer_name="No Consent User",
+            contact_channel="email",
+            contact_target="noconsent@example.com",
+            sku="PHONE-01",
+            language="en",
+            subject="Cold lead",
+            body="Available now.",
+            verification_report=self.failed_report,
+            consent_to_contact=False,  # NO CONSENT
+        )
+        self.ledger.save_draft(draft_no_consent)
+
+        # Attempting to edit and approve must raise ValueError and NOT fabricate consent
+        with self.assertRaises(ValueError) as ctx:
+            self.ledger.edit_and_approve(
+                "D-NOCONSENT",
+                new_body="Dear User, Smartphone 128GB (PHONE-01) is in stock for 1200.00 SAR.",
+                reviewer="Manager",
+                catalog=self.catalog,
+            )
+        self.assertIn("Customer has not granted opt-in contact consent", str(ctx.exception))
+
+    def test_save_draft_cannot_overwrite_finalized_records(self):
+        draft = DraftMessage(
+            draft_id="D-FIN",
+            lead_id="L-FIN",
+            customer_name="Fin User",
+            contact_channel="email",
+            contact_target="fin@example.com",
+            sku="PHONE-01",
+            language="en",
+            subject="Test",
+            body="Body",
+            verification_report=self.valid_report,
+            consent_to_contact=True,
+        )
+        self.ledger.save_draft(draft)
+        self.ledger.approve("D-FIN", reviewer="Supervisor")
+
+        # Attempting to overwrite approved draft must fail
+        with self.assertRaises(ValueError) as ctx:
+            self.ledger.save_draft(draft)
+        self.assertIn("already finalized", str(ctx.exception))
+
+    def test_dispatch_queue_filters_unconsented_and_unverified(self):
+        draft_valid = DraftMessage(
             draft_id="D-DISP-1",
             lead_id="L-20",
             customer_name="Nasser",
@@ -172,15 +273,17 @@ class TestApprovalLedger(unittest.TestCase):
             subject="Subj",
             body="متوفر بسعر 1200.00 SAR",
             verification_report=self.valid_report,
+            consent_to_contact=True,
         )
-        self.ledger.save_draft(draft1)
+        self.ledger.save_draft(draft_valid)
         self.ledger.approve("D-DISP-1", reviewer="Reviewer A")
 
         approved_list = self.ledger.get_approved_for_dispatch()
         self.assertEqual(len(approved_list), 1)
         self.assertEqual(approved_list[0].draft_id, "D-DISP-1")
 
-        self.ledger.mark_dispatched("D-DISP-1")
+        self.ledger.mark_exported(["D-DISP-1"], batch_manifest_id="TEST-MANIFEST-1")
+        # Once exported, it should no longer be pending export
         self.assertEqual(len(self.ledger.get_approved_for_dispatch()), 0)
 
 
