@@ -117,19 +117,39 @@ class BatchWorkflowEngine:
 
         return results
 
+    def recover_interrupted_exports(self, export_dir: Union[str, Path]) -> Dict[str, Any]:
+        """Scans the export directory for interrupted batches and resolves reservations durably."""
+        return self.ledger.recover_interrupted_exports(export_dir)
+
     def export_approved_to_csv(
         self,
         output_csv_path: Union[str, Path],
         mark_as_exported: bool = True,
+        overwrite: bool = False,
     ) -> int:
-        """Atomically exports verified approved drafts with a durable manifest.
-        Guarantees that a write failure never leaves a corrupt or truncated file.
+        """Atomically exports verified approved drafts with a durable reservation and recovery protocol.
+        Guarantees:
+        1. Atomic reservation prevents concurrent worker duplicate exports.
+        2. Target destination protection prevents clobbering existing dispatch files.
+        3. Staged atomic file replacement ensures complete CSV and manifest publication.
+        4. Invariant logging and error recovery releases reservation on unexpected failure.
         """
-        approved_drafts = self.ledger.get_approved_for_dispatch()
-        if not approved_drafts:
+        out_p = Path(output_csv_path).resolve()
+        manifest_p = out_p.with_suffix(".manifest.json")
+
+        if out_p.exists() and not overwrite:
+            raise FileExistsError(
+                f"Export destination '{out_p}' already exists. To prevent overwriting active dispatch queues, specify a new path or set overwrite=True."
+            )
+
+        batch_manifest_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"
+
+        # 1. Atomically reserve drafts under lease
+        reserved_drafts = self.ledger.reserve_for_export(batch_manifest_id=batch_manifest_id)
+        if not reserved_drafts:
             return 0
 
-        out_p = Path(output_csv_path).resolve()
+        draft_ids = [d.draft_id for d in reserved_drafts]
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
         fieldnames = [
@@ -149,54 +169,72 @@ class BatchWorkflowEngine:
             "consent_evidence",
         ]
 
-        batch_manifest_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"
-        draft_ids = [d.draft_id for d in approved_drafts]
-
-        # Write CSV to temporary file in same directory first to ensure atomic rename
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", newline="", dir=out_p.parent, delete=False
-        ) as tmp_file:
-            tmp_path = tmp_file.name
-            writer = csv.DictWriter(tmp_file, fieldnames=fieldnames)
-            writer.writeheader()
-            for draft in approved_drafts:
-                writer.writerow({
-                    "draft_id": draft.draft_id,
-                    "lead_id": draft.lead_id,
-                    "customer_name": draft.customer_name,
-                    "contact_channel": draft.contact_channel,
-                    "contact_target": draft.contact_target,
-                    "sku": draft.sku or "",
-                    "language": draft.language,
-                    "subject": draft.subject,
-                    "body": draft.body,
-                    "reviewed_by": draft.reviewed_by or "",
-                    "reviewed_at": draft.reviewed_at or "",
-                    "approval_status": draft.approval_status.value,
-                    "consent_to_contact": 1 if draft.consent_to_contact else 0,
-                    "consent_evidence": draft.consent_evidence,
-                })
-
-        # Write durable manifest JSON alongside the export
-        manifest_path = out_p.with_suffix(".manifest.json")
-        manifest_data = {
-            "batch_manifest_id": batch_manifest_id,
-            "export_file": out_p.name,
-            "record_count": len(draft_ids),
-            "draft_ids": draft_ids,
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with open(manifest_path, "w", encoding="utf-8") as mf:
-            json.dump(manifest_data, mf, indent=2, ensure_ascii=False)
+        tmp_csv_path: Optional[str] = None
+        tmp_mf_path: Optional[str] = None
 
         try:
-            os.replace(tmp_path, out_p)
+            # 2. Stage CSV file in temporary file
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="", dir=out_p.parent, delete=False
+            ) as tmp_csv:
+                tmp_csv_path = tmp_csv.name
+                writer = csv.DictWriter(tmp_csv, fieldnames=fieldnames)
+                writer.writeheader()
+                for draft in reserved_drafts:
+                    writer.writerow({
+                        "draft_id": draft.draft_id,
+                        "lead_id": draft.lead_id,
+                        "customer_name": draft.customer_name,
+                        "contact_channel": draft.contact_channel,
+                        "contact_target": draft.contact_target,
+                        "sku": draft.sku or "",
+                        "language": draft.language,
+                        "subject": draft.subject,
+                        "body": draft.body,
+                        "reviewed_by": draft.reviewed_by or "",
+                        "reviewed_at": draft.reviewed_at or "",
+                        "approval_status": draft.approval_status.value,
+                        "consent_to_contact": 1 if draft.consent_to_contact else 0,
+                        "consent_evidence": draft.consent_evidence,
+                    })
+                tmp_csv.flush()
+                os.fsync(tmp_csv.fileno())
+
+            # 3. Stage Manifest JSON in temporary file
+            manifest_data = {
+                "batch_manifest_id": batch_manifest_id,
+                "export_file": out_p.name,
+                "record_count": len(draft_ids),
+                "draft_ids": draft_ids,
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+            }
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=out_p.parent, delete=False
+            ) as tmp_mf:
+                tmp_mf_path = tmp_mf.name
+                json.dump(manifest_data, tmp_mf, indent=2, ensure_ascii=False)
+                tmp_mf.flush()
+                os.fsync(tmp_mf.fileno())
+
+            # 4. Atomic file replacement
+            os.replace(tmp_csv_path, out_p)
+            tmp_csv_path = None  # Successfully published
+
+            os.replace(tmp_mf_path, manifest_p)
+            tmp_mf_path = None  # Successfully published
+
+            # 5. Commit export status in ledger
+            if mark_as_exported:
+                self.ledger.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
+
+            return len(reserved_drafts)
+
         except Exception:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            # Clean up unplaced temp files
+            if tmp_csv_path and os.path.exists(tmp_csv_path):
+                os.remove(tmp_csv_path)
+            if tmp_mf_path and os.path.exists(tmp_mf_path):
+                os.remove(tmp_mf_path)
+            # Release reservation so other workers or future retries can process them
+            self.ledger.release_reservation(batch_manifest_id)
             raise
-
-        if mark_as_exported:
-            self.ledger.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
-
-        return len(approved_drafts)

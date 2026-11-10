@@ -72,6 +72,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Sneaky draft",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
             approval_status=ApprovalStatus.APPROVED,  # Caller attempts to pre-approve!
         )
         self.ledger.save_draft(draft_with_fake_approval)
@@ -98,6 +99,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Body",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft)
 
@@ -166,6 +168,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="متوفر لدينا بسعر 1200.00 SAR.",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft)
 
@@ -211,6 +214,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Comes with lifetime warranty",
             verification_report=self.uncertain_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft)
 
@@ -231,6 +235,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Priced at 1200.00 SAR.",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft)
 
@@ -255,6 +260,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Available now.",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft)
 
@@ -275,6 +281,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Available now.",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft2)
         invalid_edit = "Dear Ali, Smartphone 128GB (PHONE-01) is in stock for only 300.00 SAR!"
@@ -320,6 +327,7 @@ class TestApprovalLedger(unittest.TestCase):
             body="Body",
             verification_report=self.valid_report,
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09",
         )
         self.ledger.save_draft(draft)
         self.ledger.approve("D-FIN", reviewer="Supervisor")

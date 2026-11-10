@@ -27,10 +27,10 @@ class TestWorkflow(unittest.TestCase):
         # Create test leads CSV
         with open(self.leads_csv, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["lead_id", "customer_name", "contact_channel", "contact_target", "consent_to_contact", "preferred_language", "inquiry_text", "requested_sku"])
-            writer.writerow(["LEAD-01", "Hassan", "email", "hassan@example.com", "True", "en", "Inquiry about Laptop", "LAPTOP-X1"])
-            writer.writerow(["LEAD-02", "ريم", "whatsapp", "+966512345678", "True", "ar", "استفسار عن الفأرة", "MOUSE-M1"])
-            writer.writerow(["LEAD-03", "NoConsent", "email", "no@example.com", "False", "en", "Spam attempt", "LAPTOP-X1"])
+            writer.writerow(["lead_id", "customer_name", "contact_channel", "contact_target", "consent_to_contact", "consent_evidence", "preferred_language", "inquiry_text", "requested_sku"])
+            writer.writerow(["LEAD-01", "Hassan", "email", "hassan@example.com", "True", "Web opt-in checkbox 2026-11-09", "en", "Inquiry about Laptop", "LAPTOP-X1"])
+            writer.writerow(["LEAD-02", "ريم", "whatsapp", "+966512345678", "True", "Inbound WhatsApp opt-in 2026-11-09", "ar", "استفسار عن الفأرة", "MOUSE-M1"])
+            writer.writerow(["LEAD-03", "NoConsent", "email", "no@example.com", "False", "", "en", "Spam attempt", "LAPTOP-X1"])
 
     def tearDown(self):
         self.tmp_dir.cleanup()

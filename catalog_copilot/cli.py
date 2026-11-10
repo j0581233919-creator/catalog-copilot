@@ -120,7 +120,11 @@ def cmd_export(args: argparse.Namespace) -> int:
     try:
         ledger = ApprovalLedger(db_path=args.db)
         engine = BatchWorkflowEngine(ledger=ledger)
-        count = engine.export_approved_to_csv(output_csv_path=args.output, mark_as_exported=not args.no_dispatch)
+        count = engine.export_approved_to_csv(
+            output_csv_path=args.output,
+            mark_as_exported=not args.no_dispatch,
+            overwrite=args.overwrite,
+        )
         print(f"Exported {count} approved messages to {args.output}")
         return 0
     except Exception as e:
@@ -184,6 +188,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
             contact_channel="whatsapp",
             contact_target="+966501112233",
             consent_to_contact=True,
+            consent_evidence="Web opt-in checkbox 2026-11-09T08:00:00Z target:+966501112233",
             preferred_language="ar",
             inquiry_text="أرغب في الاستفسار عن قهوة الاسبريسو وسعرها مع الخصم",
             requested_sku="COFFEE-ESP-01",
@@ -194,6 +199,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
             contact_channel="email",
             contact_target="sarah.m@example.com",
             consent_to_contact=True,
+            consent_evidence="Inbound email inquiry consent header target:sarah.m@example.com",
             preferred_language="en",
             inquiry_text="Do you have Colombian Geisha in stock right now?",
             requested_sku="COFFEE-COL-02",
@@ -310,6 +316,7 @@ def main() -> None:
     p_exp.add_argument("--db", "-d", default="catalog_copilot.db", help="Path to SQLite queue DB")
     p_exp.add_argument("--output", "-o", default="dispatch_queue.csv", help="Output CSV path")
     p_exp.add_argument("--no-dispatch", action="store_true", help="Do not mark exported items as dispatched")
+    p_exp.add_argument("--overwrite", action="store_true", help="Overwrite destination CSV if it already exists")
     p_exp.set_defaults(func=cmd_export)
 
     # demo

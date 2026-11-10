@@ -1,6 +1,6 @@
-lead_id,customer_name,contact_channel,contact_target,consent_to_contact,preferred_language,inquiry_text,requested_sku
-LEAD-001,محمد الغامدي,whatsapp,+966501112233,True,ar,السلام عليكم، هل هاتف الجيل الخامس متوفر وما هو السعر الحالي مع الخصم؟,TECH-PHN-01
-LEAD-002,Emily Watson,email,emily.w@example.com,True,en,Hi! Can you provide the current price for the noise cancelling earbuds?,TECH-EAR-02
-LEAD-003,سارة الشمري,whatsapp,+966504445566,True,ar,أود طلب التابلت الاحترافي 11 بوصة، هل هو متاح للشحن الفوري؟,TECH-TAB-03
-LEAD-004,David Miller,email,david.m@example.com,True,en,Inquiring about office ergonomic chairs for our startup team,OFF-CHR-04
-LEAD-005,طارق السعيد,sms,+966509998811,False,ar,استفسار عن الهواتف,TECH-PHN-01
+lead_id,customer_name,contact_channel,contact_target,consent_to_contact,consent_evidence,preferred_language,inquiry_text,requested_sku
+LEAD-001,محمد الغامدي,whatsapp,+966501112233,True,Web opt-in checkbox 2026-11-09T08:00:00Z target:+966501112233,ar,السلام عليكم، هل هاتف الجيل الخامس متوفر وما هو السعر الحالي مع الخصم؟,TECH-PHN-01
+LEAD-002,Emily Watson,email,emily.w@example.com,True,Subscription form double opt-in target:emily.w@example.com,en,Hi! Can you provide the current price for the noise cancelling earbuds?,TECH-EAR-02
+LEAD-003,سارة الشمري,whatsapp,+966504445566,True,Inbound WhatsApp inquiry consent ticket #8841 target:+966504445566,ar,أود طلب التابلت الاحترافي 11 بوصة، هل هو متاح للشحن الفوري؟,TECH-TAB-03
+LEAD-004,David Miller,email,david.m@example.com,True,Contact form explicit agreement target:david.m@example.com,en,Inquiring about office ergonomic chairs for our startup team,OFF-CHR-04
+LEAD-005,طارق السعيد,sms,+966509998811,False,,ar,استفسار عن الهواتف,TECH-PHN-01

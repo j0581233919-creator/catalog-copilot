@@ -29,9 +29,9 @@ class TestEndToEnd(unittest.TestCase):
         self.leads_path = os.path.join(self.tmp_dir.name, "e2e_leads.csv")
         with open(self.leads_path, "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["lead_id", "customer_name", "contact_channel", "contact_target", "consent_to_contact", "preferred_language", "inquiry_text", "requested_sku"])
-            w.writerow(["E2E-L1", "عبدالله السالم", "whatsapp", "+966501234567", "True", "ar", "كم سعر ساعة التيتانيوم؟", "SKU-WATCH-01"])
-            w.writerow(["E2E-L2", "John Doe", "email", "john@example.com", "True", "en", "Interested in 22mm strap", "SKU-STRAP-02"])
+            w.writerow(["lead_id", "customer_name", "contact_channel", "contact_target", "consent_to_contact", "consent_evidence", "preferred_language", "inquiry_text", "requested_sku"])
+            w.writerow(["E2E-L1", "عبدالله السالم", "whatsapp", "+966501234567", "True", "Web opt-in checkbox 2026-11-09", "ar", "كم سعر ساعة التيتانيوم؟", "SKU-WATCH-01"])
+            w.writerow(["E2E-L2", "John Doe", "email", "john@example.com", "True", "Inbound email header 2026-11-09", "en", "Interested in 22mm strap", "SKU-STRAP-02"])
 
         self.db_path = os.path.join(self.tmp_dir.name, "e2e.db")
         self.dispatch_csv = os.path.join(self.tmp_dir.name, "e2e_dispatch.csv")

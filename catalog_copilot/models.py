@@ -47,7 +47,8 @@ class CatalogItem:
     discount_price: Optional[float] = None
     offer_description_en: Optional[str] = None
     offer_description_ar: Optional[str] = None
-    offer_valid_until: Optional[str] = None  # ISO timestamp string
+    offer_valid_from: Optional[str] = None   # ISO timestamp string or YYYY-MM-DD
+    offer_valid_until: Optional[str] = None  # ISO timestamp string or YYYY-MM-DD
     category: str = ""
 
     def __post_init__(self):
@@ -66,6 +67,28 @@ class CatalogItem:
             self.discount_price = float(self.discount_price)
             if math.isnan(self.discount_price) or math.isinf(self.discount_price):
                 raise ValueError(f"SKU '{self.sku}' has non-finite discount price: {self.discount_price}")
+
+        if self.offer_valid_from:
+            self.offer_valid_from = self._validate_and_normalize_date(self.offer_valid_from, "offer_valid_from")
+        if self.offer_valid_until:
+            self.offer_valid_until = self._validate_and_normalize_date(self.offer_valid_until, "offer_valid_until")
+
+    def _validate_and_normalize_date(self, val: str, field_name: str) -> str:
+        s = str(val).strip()
+        if not s:
+            return ""
+        try:
+            if len(s) == 10 and s.count("-") == 2:
+                dt = datetime.fromisoformat(s)
+            else:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except Exception as e:
+            raise ValueError(
+                f"SKU '{self.sku}' has invalid {field_name} format: '{val}'. Expected valid ISO date or timestamp."
+            ) from e
 
     @property
     def effective_price(self) -> float:
@@ -137,15 +160,8 @@ class LeadInquiry:
         else:
             raise ValueError(f"Invalid consent type {type(self.consent_to_contact)}. Must be an explicit documented boolean.")
 
-        # Consent evidence validation: if consented, evidence must not be empty
-        if self.consent_to_contact:
-            evidence_str = str(self.consent_evidence or "").strip()
-            if not evidence_str:
-                self.consent_evidence = f"Documented inquiry consent for {self.lead_id} ({self.contact_channel}:{self.contact_target})"
-            else:
-                self.consent_evidence = evidence_str
-        else:
-            self.consent_evidence = str(self.consent_evidence or "No opt-in consent provided")
+        # Documented consent evidence: preserve actual provenance without fabricating proof
+        self.consent_evidence = str(self.consent_evidence or "").strip()
 
         lang = str(self.preferred_language).strip().lower()
         self.preferred_language = "ar" if lang in ("ar", "arabic", "ar-sa", "ar-eg", "عربي") else "en"

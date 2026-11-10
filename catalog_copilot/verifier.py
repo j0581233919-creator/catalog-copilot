@@ -47,11 +47,24 @@ class CommercialClaimVerifier:
         re.compile(r"(?:خصم|تخفيض)\s*(\d+(?:\.\d+)?)\s*%", re.IGNORECASE),
     ]
 
-    # Broad ungrounded commercial claim keywords (must fail-closed if found without catalog support)
+    # Broad ungrounded commercial & specification claim keywords (must fail-closed if found without catalog support)
     _UNGROUNDED_PATTERNS = [
-        re.compile(r"\b(\w+\s+)?(warranty|guarantee|guaranteed|refund|return policy|free shipping|free delivery|free gift|gift|price match|lowest price|cashback)\b", re.IGNORECASE),
+        re.compile(r"\b(\w+\s+)?(warranty|guarantee|guaranteed|refund|return policy|free shipping|free delivery|free gift|gift|price match|lowest price|best price|cashback)\b", re.IGNORECASE),
         re.compile(r"(ضمان|كفالة|استرجاع|استرداد|شحن مجاني|توصيل مجاني|هدية|أقل سعر|أفضل سعر|كاش باك)", re.IGNORECASE),
+        re.compile(r"\b(waterproof|water-resistant|dustproof|drop-proof|battery|battery life|wireless|bluetooth|fast charging|charger included|accessories included|titanium|leather|cotton|organic|resolution|camera|megapixel|storage|ram|processor|genuine|original|certified|unlocked)\b", re.IGNORECASE),
+        re.compile(r"(مقاوم للماء|ضد الماء|مقاوم للغبار|مقاوم للصدمات|عمر البطارية|بطارية|لاسلكي|بلوتوث|شحن سريع|شاحن مرفق|ملحقات مرفقة|تيتانيوم|جلد طبيعي|قطن|عضوي|دقة الشاشة|كاميرا|ذاكرة|معالج|أصلي|معتمد|مفتوح الشبكة)", re.IGNORECASE),
     ]
+
+    _PREDICATE_ASSERTIONS = [
+        re.compile(r"\b(?:is|are)\s+([a-zA-Z0-9_\-]+)\b", re.IGNORECASE),
+        re.compile(r"(?:مصنوع من|يتميز بـ|مزود بـ)\s+([\u0621-\u064A0-9_\-]+)"),
+    ]
+
+    # Standard benign predicates allowed in polite sales messages
+    _BENIGN_PREDICATES = {
+        "currently", "available", "unavailable", "ready", "happy", "pleased", "glad",
+        "here", "welcomed", "confirmed", "out", "in", "متوفر", "غير", "متاح", "سعداء", "جاهز",
+    }
 
     # Normalized currency mapping
     _CURRENCY_NORM = {
@@ -152,6 +165,17 @@ class CommercialClaimVerifier:
 
         return claims_in, claims_out, False
 
+    @staticmethod
+    def _parse_iso_date(val: str) -> datetime:
+        s = str(val).strip()
+        if len(s) == 10 and s.count("-") == 2:
+            dt = datetime.fromisoformat(s)
+        else:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     def verify(
         self,
         lead: LeadInquiry,
@@ -166,6 +190,7 @@ class CommercialClaimVerifier:
         checks: List[ClaimVerification] = []
         reasons: List[str] = []
         overall_status = VerificationStatus.PASS
+        is_contra = False
 
         # 1. Mandatory Customer Consent Guardrail
         if not lead.consent_to_contact:
@@ -178,6 +203,16 @@ class CommercialClaimVerifier:
             ))
             reasons.append("Consent violation: Lead opted out or has no verified contact permission.")
             overall_status = VerificationStatus.FAIL
+        elif not (lead.consent_evidence and lead.consent_evidence.strip()):
+            checks.append(ClaimVerification(
+                claim_type=ClaimType.CONSENT,
+                claimed_value="Missing documented evidence",
+                catalog_value="Auditable opt-in evidence required",
+                is_valid=False,
+                notes="CRITICAL GUARDRAIL: Customer opt-in flag is True, but no documented consent evidence was provided. Outreach prohibited without verifiable evidence.",
+            ))
+            reasons.append("Consent violation: Missing auditable opt-in evidence.")
+            overall_status = VerificationStatus.FAIL
         else:
             checks.append(ClaimVerification(
                 claim_type=ClaimType.CONSENT,
@@ -187,26 +222,43 @@ class CommercialClaimVerifier:
                 notes=f"Verified customer opt-in consent exists (Evidence: {lead.consent_evidence}).",
             ))
 
-        # 2. Check for Ungrounded Claims (warranties, free shipping, gifts, guarantees)
+        # 2. Check for Ungrounded Claims (warranties, free shipping, gifts, guarantees, specs)
         sku = (target_sku or lead.requested_sku or "").strip().upper()
         catalog_item: Optional[CatalogItem] = catalog.get_item(sku) if sku else None
+
+        cat_desc = ""
+        if catalog_item:
+            cat_desc = f"{catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}".lower()
 
         for pattern in self._UNGROUNDED_PATTERNS:
             match = pattern.search(draft_text)
             if match:
                 term = match.group(0).strip()
-                # Check if catalog explicitly supports this term in descriptions
-                cat_desc = f"{catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}" if catalog_item else ""
-                if term.lower() not in cat_desc.lower():
+                if (not catalog_item) or (term.lower() not in cat_desc):
                     checks.append(ClaimVerification(
                         claim_type=ClaimType.UNGROUNDED_CLAIM,
                         claimed_value=term,
                         catalog_value=None,
                         is_valid=False,
-                        notes=f"Draft asserts ungrounded commercial term '{term}' not supported by merchant catalog.",
+                        notes=f"Draft asserts ungrounded commercial/product term '{term}' not supported by merchant catalog.",
                     ))
                     reasons.append(f"Ungrounded claim: '{term}' is not supported by catalog ground truth.")
                     overall_status = VerificationStatus.UNCERTAIN
+
+        for pred_pattern in self._PREDICATE_ASSERTIONS:
+            for match in pred_pattern.finditer(draft_text):
+                pred_val = match.group(1).strip().lower()
+                if pred_val not in self._BENIGN_PREDICATES and len(pred_val) >= 3:
+                    if (not catalog_item) or (pred_val not in cat_desc):
+                        checks.append(ClaimVerification(
+                            claim_type=ClaimType.UNGROUNDED_CLAIM,
+                            claimed_value=pred_val,
+                            catalog_value=None,
+                            is_valid=False,
+                            notes=f"Draft asserts ungrounded product specification '{pred_val}' not verified in merchant catalog.",
+                        ))
+                        reasons.append(f"Ungrounded specification: '{pred_val}' not found in catalog.")
+                        overall_status = VerificationStatus.UNCERTAIN
 
         # 3. SKU Existence and Text Binding Check
         if sku:
@@ -373,11 +425,12 @@ class CommercialClaimVerifier:
             if claimed_discount is not None:
                 extracted_discounts.append(claimed_discount)
 
-            # Check promotion expiry if validity date is set
+            # Check promotion start & expiry dates if configured
+            now_utc = datetime.now(timezone.utc)
             if catalog_item.offer_valid_until:
                 try:
-                    expiry_dt = datetime.fromisoformat(catalog_item.offer_valid_until.replace("Z", "+00:00"))
-                    if datetime.now(timezone.utc) > expiry_dt:
+                    expiry_dt = self._parse_iso_date(catalog_item.offer_valid_until)
+                    if now_utc > expiry_dt:
                         if extracted_discounts or catalog_item.discount_percent > 0:
                             checks.append(ClaimVerification(
                                 claim_type=ClaimType.DISCOUNT_OFFER,
@@ -388,8 +441,41 @@ class CommercialClaimVerifier:
                             ))
                             reasons.append("Expired promotion: Offer date is in the past.")
                             overall_status = VerificationStatus.FAIL
-                except ValueError:
-                    pass
+                except Exception:
+                    checks.append(ClaimVerification(
+                        claim_type=ClaimType.DISCOUNT_OFFER,
+                        claimed_value="Promotional discount",
+                        catalog_value=f"Invalid date: {catalog_item.offer_valid_until}",
+                        is_valid=False,
+                        notes=f"Cannot verify promotion: catalog offer_valid_until '{catalog_item.offer_valid_until}' is invalid.",
+                    ))
+                    reasons.append(f"Invalid offer validity date format: '{catalog_item.offer_valid_until}'.")
+                    overall_status = VerificationStatus.FAIL
+
+            if catalog_item.offer_valid_from:
+                try:
+                    start_dt = self._parse_iso_date(catalog_item.offer_valid_from)
+                    if now_utc < start_dt:
+                        if extracted_discounts or catalog_item.discount_percent > 0:
+                            checks.append(ClaimVerification(
+                                claim_type=ClaimType.DISCOUNT_OFFER,
+                                claimed_value="Active promotion",
+                                catalog_value=f"Starts on {catalog_item.offer_valid_from}",
+                                is_valid=False,
+                                notes="Promotional offer has not yet started according to catalog offer_valid_from date.",
+                            ))
+                            reasons.append("Inactive promotion: Offer date is in the future.")
+                            overall_status = VerificationStatus.FAIL
+                except Exception:
+                    checks.append(ClaimVerification(
+                        claim_type=ClaimType.DISCOUNT_OFFER,
+                        claimed_value="Promotional discount",
+                        catalog_value=f"Invalid date: {catalog_item.offer_valid_from}",
+                        is_valid=False,
+                        notes=f"Cannot verify promotion: catalog offer_valid_from '{catalog_item.offer_valid_from}' is invalid.",
+                    ))
+                    reasons.append(f"Invalid offer start date format: '{catalog_item.offer_valid_from}'.")
+                    overall_status = VerificationStatus.FAIL
 
             for discount_val in extracted_discounts:
                 discount_rounded = round(discount_val, 1)

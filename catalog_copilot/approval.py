@@ -5,7 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from .models import (
     DraftMessage,
@@ -65,6 +65,10 @@ class ApprovalLedger:
                 conn.execute("ALTER TABLE drafts ADD COLUMN consent_to_contact INTEGER NOT NULL DEFAULT 0")
             if "consent_evidence" not in existing_columns:
                 conn.execute("ALTER TABLE drafts ADD COLUMN consent_evidence TEXT")
+            if "reservation_token" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN reservation_token TEXT")
+            if "reservation_expires_at" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN reservation_expires_at TEXT")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -434,16 +438,82 @@ class ApprovalLedger:
                   AND is_dispatched = 0
                   AND consent_to_contact = 1
                   AND verification_status = 'PASS'
+                  AND reservation_token IS NULL
                 ORDER BY reviewed_at ASC
                 """,
                 (ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
             )
             return [self._row_to_draft(row) for row in cursor.fetchall()]
 
-    def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> int:
-        """Atomically transitions approved drafts to EXPORTED in a single transaction.
-        Returns the exact number of rows successfully updated.
+    def reserve_for_export(self, batch_manifest_id: str, lease_seconds: int = 300) -> List[DraftMessage]:
+        """Atomically reserves approved, unexported drafts under a lease token.
+        Protects against concurrent export workers and prevents duplicate exports on crash.
         """
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        lease_expiry_iso = (now + timedelta(seconds=lease_seconds)).isoformat()
+
+        with self._get_connection() as conn:
+            # 1. Release expired reservations from dead/crashed processes
+            conn.execute(
+                """
+                UPDATE drafts
+                SET reservation_token = NULL, reservation_expires_at = NULL
+                WHERE reservation_token IS NOT NULL
+                  AND reservation_expires_at < ?
+                  AND approval_status IN (?, ?)
+                """,
+                (now_iso, ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
+            )
+
+            # 2. Select eligible drafts for reservation
+            cursor = conn.execute(
+                """
+                SELECT * FROM drafts
+                WHERE approval_status IN (?, ?)
+                  AND is_dispatched = 0
+                  AND consent_to_contact = 1
+                  AND verification_status = 'PASS'
+                  AND reservation_token IS NULL
+                ORDER BY reviewed_at ASC
+                """,
+                (ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return []
+
+            draft_ids = [row["draft_id"] for row in rows]
+            placeholders = ",".join("?" for _ in draft_ids)
+            conn.execute(
+                f"""
+                UPDATE drafts
+                SET reservation_token = ?, reservation_expires_at = ?
+                WHERE draft_id IN ({placeholders})
+                """,
+                [batch_manifest_id, lease_expiry_iso] + draft_ids,
+            )
+            conn.commit()
+
+            return [self._row_to_draft(row) for row in rows]
+
+    def release_reservation(self, batch_manifest_id: str) -> int:
+        """Releases an active reservation token back to the queue (e.g. upon export failure)."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE drafts
+                SET reservation_token = NULL, reservation_expires_at = NULL
+                WHERE reservation_token = ?
+                """,
+                (batch_manifest_id,),
+            )
+            count = cursor.rowcount
+            conn.commit()
+            return count
+
+    def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> int:
+        """Atomically transitions reserved drafts to EXPORTED and clears reservation tokens."""
         if not draft_ids:
             return 0
 
@@ -452,7 +522,10 @@ class ApprovalLedger:
 
         with self._get_connection() as conn:
             for draft_id in draft_ids:
-                cursor = conn.execute("SELECT approval_status FROM drafts WHERE draft_id = ?", (draft_id,))
+                cursor = conn.execute(
+                    "SELECT approval_status, reservation_token FROM drafts WHERE draft_id = ?",
+                    (draft_id,),
+                )
                 row = cursor.fetchone()
                 if not row:
                     continue
@@ -464,7 +537,8 @@ class ApprovalLedger:
                 conn.execute(
                     """
                     UPDATE drafts
-                    SET approval_status = ?, is_dispatched = 0
+                    SET approval_status = ?, is_dispatched = 0,
+                        reservation_token = NULL, reservation_expires_at = NULL
                     WHERE draft_id = ?
                     """,
                     (ApprovalStatus.EXPORTED.value, draft_id),
@@ -482,6 +556,54 @@ class ApprovalLedger:
             conn.commit()
 
         return updated_count
+
+    def recover_interrupted_exports(self, export_dir: Union[str, Path]) -> Dict[str, Any]:
+        """Scans export directory and recovers or clears orphaned reservations."""
+        export_path = Path(export_dir).resolve()
+        recovered = []
+        released = []
+
+        if not export_path.exists():
+            return {"recovered": recovered, "released": released}
+
+        manifest_files = list(export_path.glob("*.manifest.json"))
+        manifest_map: Dict[str, tuple[Path, Dict[str, Any]]] = {}
+        for mf in manifest_files:
+            try:
+                with open(mf, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    b_id = data.get("batch_manifest_id")
+                    if b_id:
+                        manifest_map[b_id] = (mf, data)
+            except Exception:
+                continue
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT DISTINCT reservation_token FROM drafts
+                WHERE reservation_token IS NOT NULL
+                """
+            )
+            active_tokens = [row["reservation_token"] for row in cursor.fetchall()]
+
+        for token in active_tokens:
+            if token in manifest_map:
+                mf_path, mf_data = manifest_map[token]
+                csv_filename = mf_data.get("export_file")
+                csv_path = export_path / csv_filename if csv_filename else None
+                if csv_path and csv_path.exists() and csv_path.stat().st_size > 0:
+                    draft_ids = mf_data.get("draft_ids", [])
+                    self.mark_exported(draft_ids, token)
+                    recovered.append(token)
+                else:
+                    self.release_reservation(token)
+                    released.append(token)
+            else:
+                self.release_reservation(token)
+                released.append(token)
+
+        return {"recovered": recovered, "released": released}
 
     def mark_dispatched(self, draft_id: str) -> None:
         """Marks an exported or approved draft as dispatched upon delivery confirmation."""

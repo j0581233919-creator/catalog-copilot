@@ -183,6 +183,7 @@ class CatalogLoader:
                     f"SKU '{sku}' specifies discount_price {discount_price} but discount_percent is 0%. Prices must match."
                 )
 
+        offer_valid_from = str(row.get("offer_valid_from") or "").strip() or None
         offer_valid_until = str(row.get("offer_valid_until") or "").strip() or None
 
         return CatalogItem(
@@ -197,6 +198,7 @@ class CatalogLoader:
             discount_price=discount_price,
             offer_description_en=str(row.get("offer_description_en") or "").strip() or None,
             offer_description_ar=str(row.get("offer_description_ar") or "").strip() or None,
+            offer_valid_from=offer_valid_from,
             offer_valid_until=offer_valid_until,
             category=str(row.get("category") or "").strip(),
         )
