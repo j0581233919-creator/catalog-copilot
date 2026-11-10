@@ -61,21 +61,25 @@ def _is_proven_published_for_token(
                 raw_headers = next(raw_reader)
             except StopIteration:
                 return False
-            # Reject CSV if duplicate headers exist
-            if len(raw_headers) != len(set(raw_headers)):
+            # Reject CSV if headers do not exactly match REQUIRED_EXPORT_COLUMNS in order and count
+            if tuple(raw_headers) != REQUIRED_EXPORT_COLUMNS:
                 return False
 
             f.seek(0)
             reader = csv.DictReader(f)
-            fieldnames = set(reader.fieldnames or [])
-            if not set(REQUIRED_EXPORT_COLUMNS).issubset(fieldnames):
-                return False
 
             seen_draft_ids = []
             seen_draft_set = set()
             rows_by_id = {}
 
             for row in reader:
+                # Reject malformed rows with extra columns (stored by DictReader under key None)
+                if None in row:
+                    return False
+                # Reject rows with missing fields (values mapped to None by DictReader)
+                if any(v is None for v in row.values()):
+                    return False
+
                 if row.get("batch_manifest_id") != batch_manifest_id:
                     return False
 
@@ -86,16 +90,19 @@ def _is_proven_published_for_token(
                 seen_draft_ids.append(did)
                 seen_draft_set.add(did)
 
-                # Validate mandatory dispatch recipient, body, and consent values
+                # Validate mandatory dispatch recipient, body, status, and consent values
                 channel = (row.get("contact_channel") or "").strip()
                 target = (row.get("contact_target") or "").strip()
                 body = (row.get("body") or "").strip()
                 consent_ev = (row.get("consent_evidence") or "").strip()
                 consent_opt = str(row.get("consent_to_contact") or "").strip()
+                app_status = (row.get("approval_status") or "").strip()
 
                 if not channel or not target or not body or not consent_ev:
                     return False
                 if consent_opt not in ("1", "True", "true"):
+                    return False
+                if app_status not in (ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value):
                     return False
 
                 rows_by_id[did] = row
@@ -135,6 +142,15 @@ def _is_proven_published_for_token(
                     if (r.get("body") or "").strip() != (exp_draft.body or "").strip():
                         return False
                     if (r.get("reviewed_by") or "").strip() != (exp_draft.reviewed_by or "").strip():
+                        return False
+                    if (r.get("reviewed_at") or "").strip() != (exp_draft.reviewed_at or "").strip():
+                        return False
+                    exp_status_val = exp_draft.approval_status.value if isinstance(exp_draft.approval_status, ApprovalStatus) else str(exp_draft.approval_status)
+                    if (r.get("approval_status") or "").strip() != exp_status_val.strip():
+                        return False
+                    exp_consent = "1" if exp_draft.consent_to_contact else "0"
+                    r_consent = "1" if str(r.get("consent_to_contact") or "").strip() in ("1", "True", "true") else "0"
+                    if r_consent != exp_consent:
                         return False
                     if (r.get("consent_evidence") or "").strip() != (exp_draft.consent_evidence or "").strip():
                         return False

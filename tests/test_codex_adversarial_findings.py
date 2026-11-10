@@ -310,8 +310,8 @@ class TestCodexAdversarialFindings(unittest.TestCase):
                 "language": "en",
                 "subject": "Ready",
                 "body": "Your item SKU-A is ready.",
-                "reviewed_by": "Admin Reviewer",
-                "reviewed_at": "2026-11-10T00:00:00Z",
+                "reviewed_by": reserved[0].reviewed_by or "Admin Reviewer",
+                "reviewed_at": reserved[0].reviewed_at,
                 "approval_status": "APPROVED",
                 "consent_to_contact": "1",
                 "consent_evidence": "Evidence #1100",
@@ -911,6 +911,7 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         with open(csv_dest, "w", encoding="utf-8", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
+            res_map = {r.draft_id: r for r in reserved}
             for did in ["DRAFT-DUP-1", "DRAFT-DUP-2"]:
                 w.writerow({
                     "batch_manifest_id": tok,
@@ -924,7 +925,7 @@ class TestCodexAdversarialFindings(unittest.TestCase):
                     "subject": "Subj",
                     "body": "Standard Item A is in stock for 100 SAR.",
                     "reviewed_by": "Admin Reviewer",
-                    "reviewed_at": "2026-11-10T00:00:00Z",
+                    "reviewed_at": res_map[did].reviewed_at,
                     "approval_status": "APPROVED",
                     "consent_to_contact": "1",
                     "consent_evidence": "Evidence #999",
@@ -934,6 +935,155 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         rec_stats2 = engine.recover_interrupted_exports(test_dir)
         self.assertEqual(len(rec_stats2["recovered"]), 1)
         self.assertIn(tok, rec_stats2["recovered"])
+
+    def test_codex_review6_finding1_mixed_assertion_question_cannot_bypass_grounding(self):
+        """Review 6 Finding 1: A question mark must not exempt an entire mixed assertion from grounding."""
+        # 1. Inquiry mixes declarative assertion with question
+        lead_mixed = LeadInquiry(
+            lead_id="LEAD-MIXED-1",
+            customer_name="Ahmed Ali",
+            contact_channel="email",
+            contact_target="ahmed@example.com",
+            preferred_language="en",
+            inquiry_text="SKU-A contains asbestos. Is it available?",
+            consent_to_contact=True,
+            consent_evidence="Web form checkbox #888",
+        )
+        # Draft quotes the mixed sentence (declarative assertion + question)
+        draft_mixed = 'Regarding your question, "SKU-A contains asbestos. Is it available?", Standard Item A is in stock for 100 SAR.'
+        report_mixed = self.verifier.verify(
+            lead=lead_mixed,
+            catalog=self.catalog,
+            draft_text=draft_mixed,
+            target_sku="SKU-A",
+        )
+        self.assertEqual(report_mixed.status, VerificationStatus.UNCERTAIN)
+        self.assertTrue(any("asbestos" in str(c.claimed_value or "").lower() or "asbestos" in str(c.notes or "").lower() for c in report_mixed.checks))
+
+        # 2. Quoting only the pure interrogative question clause passes
+        draft_interrogative_only = 'Regarding your question, "Is it available?", Standard Item A is in stock for 100 SAR.'
+        report_interrogative = self.verifier.verify(
+            lead=lead_mixed,
+            catalog=self.catalog,
+            draft_text=draft_interrogative_only,
+            target_sku="SKU-A",
+        )
+        self.assertEqual(report_interrogative.status, VerificationStatus.PASS)
+
+        # 3. Pure interrogative question in inquiry preserving question format passes
+        lead_pure_question = LeadInquiry(
+            lead_id="LEAD-PURE-Q",
+            customer_name="Ahmed Ali",
+            contact_channel="email",
+            contact_target="ahmed@example.com",
+            preferred_language="en",
+            inquiry_text="Is it true SKU-A contains asbestos?",
+            consent_to_contact=True,
+            consent_evidence="Web form checkbox #888",
+        )
+        draft_pure_q = 'Regarding your question, "Is it true SKU-A contains asbestos?", Standard Item A is in stock for 100 SAR.'
+        report_pure_q = self.verifier.verify(
+            lead=lead_pure_question,
+            catalog=self.catalog,
+            draft_text=draft_pure_q,
+            target_sku="SKU-A",
+        )
+        self.assertEqual(report_pure_q.status, VerificationStatus.PASS)
+
+    def test_codex_review6_finding2_recovery_rejects_extra_fields_and_altered_approval_status(self):
+        """Review 6 Finding 2: Recovery must reject rows with extra fields, altered approval_status, or altered timestamps."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-REV6-01",
+            lead_id="LEAD-REV6-01",
+            customer_name="Audit Tester",
+            contact_channel="email",
+            contact_target="audit@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Item Update",
+            body="Standard Item A is in stock for 100 SAR.",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Standard Item A is in stock for 100 SAR.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Evidence #Rev6",
+        )
+        ledger.save_draft(draft)
+        ledger.approve("DRAFT-REV6-01", reviewer="Security Reviewer")
+
+        test_dir = os.path.join(self.tmp_dir.name, "rev6_batch_dir")
+        os.makedirs(test_dir, exist_ok=True)
+        csv_dest = os.path.join(test_dir, "batch.csv")
+
+        tok = "EXP-REV6-TOK"
+        reserved = ledger.reserve_for_export(batch_manifest_id=tok, export_destination=csv_dest)
+        self.assertEqual(len(reserved), 1)
+        res_draft = reserved[0]
+
+        valid_row_dict = {
+            "batch_manifest_id": tok,
+            "draft_id": res_draft.draft_id,
+            "lead_id": res_draft.lead_id,
+            "customer_name": res_draft.customer_name,
+            "contact_channel": res_draft.contact_channel,
+            "contact_target": res_draft.contact_target,
+            "sku": res_draft.sku or "",
+            "language": res_draft.language,
+            "subject": res_draft.subject,
+            "body": res_draft.body,
+            "reviewed_by": res_draft.reviewed_by or "",
+            "reviewed_at": res_draft.reviewed_at or "",
+            "approval_status": "APPROVED",
+            "consent_to_contact": "1",
+            "consent_evidence": res_draft.consent_evidence,
+        }
+
+        # Sub-test A: Row has an extra appended field -> Must be rejected by recovery
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(list(valid_row_dict.keys()))
+            writer.writerow(list(valid_row_dict.values()) + ["MALICIOUS_EXTRA_FIELD"])
+
+        rec_extra = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_extra["recovered"]), 0, "Row with extra fields must NOT be recovered.")
+
+        # Sub-test B: Row has approval_status changed to REJECTED -> Must be rejected by recovery
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            altered_row = dict(valid_row_dict)
+            altered_row["approval_status"] = "REJECTED"
+            writer = csv.DictWriter(f, fieldnames=list(valid_row_dict.keys()))
+            writer.writeheader()
+            writer.writerow(altered_row)
+
+        rec_rejected = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_rejected["recovered"]), 0, "Row with REJECTED status must NOT be recovered.")
+
+        # Sub-test C: Row has altered reviewed_at timestamp -> Must be rejected by recovery
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            altered_row = dict(valid_row_dict)
+            altered_row["reviewed_at"] = "1999-01-01T00:00:00Z"
+            writer = csv.DictWriter(f, fieldnames=list(valid_row_dict.keys()))
+            writer.writeheader()
+            writer.writerow(altered_row)
+
+        rec_time = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_time["recovered"]), 0, "Row with altered reviewed_at must NOT be recovered.")
+
+        # Sub-test D: Valid uncorrupted row matching reserved draft exactly -> Must be recovered
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(valid_row_dict.keys()))
+            writer.writeheader()
+            writer.writerow(valid_row_dict)
+
+        rec_valid = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_valid["recovered"]), 1)
+        self.assertIn(tok, rec_valid["recovered"])
 
 
 if __name__ == "__main__":
