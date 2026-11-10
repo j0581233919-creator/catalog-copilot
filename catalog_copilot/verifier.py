@@ -133,27 +133,46 @@ class CommercialClaimVerifier:
         r")(?:\s+|$)",
     )
 
+    _CLAUSAL_CONNECTIVES_EN = re.compile(
+        r"\b(?:"
+        r"and|but|yet|so|or|"
+        r"although|though|even\s+though|even\s+if|"
+        r"since|because|given\s+that|knowing\s+that|considering\s+that|assuming\s+that|"
+        r"while|whereas|despite|in\s+spite\s+of|seeing\s+that|inasmuch\s+as|provided\s+that|"
+        r"as\s+well\s+as|in\s+addition\s+to|besides|plus"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    _CLAUSAL_CONNECTIVES_AR = re.compile(
+        r"\b(?:"
+        r"مع\s+أن|رغم\s+أن|بالرغم\s+من|بما\s+أن|حيث\s+أن|لأن|إذ\s+أن|طالما\s+أن|"
+        r"لكن|ولكن|بينما|غير\s+أن|علماً\s+أن|مع\s+العلم\s+أن|بالإضافة\s+إلى"
+        r")\b|\s+(?:و|أو|لكن)\s+",
+    )
+
     @classmethod
     def _is_pure_interrogative_clause(cls, text: str) -> bool:
         """Determines if a clause is strictly an interrogative question without declarative assertions.
-        Must end with ? or ؟, contain no internal sentence/clause boundaries, and start with an interrogative starter.
+        Must end with ? or ؟, contain no internal sentence/clause boundaries or clausal connectives,
+        and start with an interrogative starter.
         """
         t = text.strip()
         if not t or not re.search(r"[\?؟]$", t):
             return False
 
         body = t[:-1].strip()
-        # Must not contain internal question marks, periods, exclamation, semicolons, colons, or newlines
-        if re.search(r"[\.!\;؛:?\n\r؟]", body):
+        # Must not contain internal punctuation that divides sentences or clauses:
+        # periods, exclamation, semicolons, colons, slashes, pipes, question marks, commas, newlines
+        if re.search(r"[\.!\;؛:?\n\r,،/\\|~^]", body):
             return False
 
-        # Must not contain clause boundaries like commas or dashes between clauses
-        # (Note: hyphen within a word/SKU like 'SKU-A' is allowed, but ' - ' or '--' is a clause boundary)
-        if re.search(r"[,،]|\s+[-—–]+\s+", body):
+        # Must not contain dash or em-dash clause boundaries (e.g. ' - ' or '--')
+        if re.search(r"\s+[-—–]+\s+|--", body):
             return False
 
-        # Must not contain compound conjunctions that connect a declarative statement to a question
-        if re.search(r"\b(?:and|but|yet|so)\b|\s+(?:و|لكن)\s+", body, re.IGNORECASE):
+        # Must not contain clausal connectives that introduce subordinate or coordinate assertion clauses
+        if cls._CLAUSAL_CONNECTIVES_EN.search(body) or cls._CLAUSAL_CONNECTIVES_AR.search(body):
             return False
 
         # Must start with an interrogative question starter in English or Arabic
@@ -165,7 +184,12 @@ class CommercialClaimVerifier:
     def _extract_pure_interrogative_clauses(cls, text: str) -> List[str]:
         """Extracts genuine, isolated interrogative question clauses from customer text."""
         valid_clauses = []
-        pattern = r"(?:^|[\.!\;؛:\n\r,،]|\b(?:and|but|yet|so)\b|\s+(?:و|لكن)\s+)\s*([^.!?؛;:\n\r,،]+?[\?؟])"
+        pattern = (
+            r"(?:^|[\.!\;؛:\n\r,،/\\|~^]|\s+[-—–]+\s+|--"
+            r"|\b(?:and|but|yet|so|or|although|though|even\s+though|since|because|while|whereas)\b"
+            r"|\b(?:مع\s+أن|رغم\s+أن|بما\s+أن|حيث\s+أن|لأن|لكن|ولكن)\b|\s+(?:و|أو|لكن)\s+)"
+            r"\s*([^.!?؛;:\n\r,،/\\|~^]+?[\?؟])"
+        )
         for match in re.finditer(pattern, text, re.IGNORECASE):
             candidate = match.group(1).strip()
             if cls._is_pure_interrogative_clause(candidate):

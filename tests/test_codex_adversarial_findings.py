@@ -990,13 +990,17 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         )
         self.assertEqual(report_pure_q.status, VerificationStatus.PASS)
 
-        # 4. Comma-separated, conjunction-separated, and mixed bilingual assertions MUST return UNCERTAIN
+        # 4. Comma-separated, conjunction-separated, slash-separated, and subordinate mixed assertions MUST return UNCERTAIN
         from dataclasses import replace
         for mixed_q in [
             'SKU-A contains asbestos, is it available?',
             'SKU-A contains asbestos and is it available?',
             'SKU-A contains asbestos؟ هل هو متوفر؟',
             'المنتج يحتوي أسبستوس، هل هو متوفر؟',
+            'Is it available although SKU-A contains asbestos?',
+            'Can you confirm availability since SKU-A contains asbestos?',
+            'Is it available / SKU-A contains asbestos?',
+            'هل هو متوفر مع أن المنتج يحتوي أسبستوس؟',
         ]:
             l_mix = replace(lead_mixed, inquiry_text=mixed_q)
             d_mix = f'Regarding your question, "{mixed_q}", Standard Item A is in stock for 100 SAR.'
