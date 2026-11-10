@@ -279,29 +279,40 @@ class CommercialClaimVerifier:
             if not claim_phrase:
                 return False
 
-            words = claim_phrase.split()
+            # Must strictly contain only alphanumeric characters, spaces, and permitted hyphens
+            if not re.match(r"^[a-zA-Z0-9\s\-]+$", claim_phrase):
+                return False
+
+            tokens = claim_phrase.split()
+            # Strict hyphen check: hyphens are only allowed in numeric attribute tokens like '2-year'
+            for token in tokens:
+                if "-" in token:
+                    if not re.match(r"^\d+-(?:year|month|day|week|meter|cm|mm|kg|g|lb|oz|v|w|gb|tb|mah)s?$", token, re.IGNORECASE):
+                        return False
+
             # Copular verb validation
             if (verb_matched.startswith("is") or verb_matched.startswith("are") or
                     verb_matched.startswith("was") or verb_matched.startswith("were")):
                 if "made" in verb_matched:
-                    if len(words) != 1:
+                    if len(tokens) != 1:
                         return False
                 else:
-                    if len(words) == 1:
+                    if len(tokens) == 1:
                         pass
-                    elif len(words) == 2 and words[0].lower() in ("a", "an"):
+                    elif len(tokens) == 2 and tokens[0].lower() in ("a", "an"):
                         pass
                     else:
                         return False
             else:
                 # Transitive verb validation: at most 2 words, or 3 if starting with an article
-                if len(words) > 3:
+                if len(tokens) > 3:
                     return False
-                if len(words) == 3 and words[0].lower() not in ("a", "an", "the"):
+                if len(tokens) == 3 and tokens[0].lower() not in ("a", "an", "the"):
                     return False
 
-            for w in words:
-                w_lower = w.lower()
+            # Check all atomic word components (even inside hyphens) against prepositions, participles, and extra verbs
+            for sub_w in re.findall(r"[a-zA-Z]+", claim_phrase):
+                w_lower = sub_w.lower()
                 if w_lower in cls._PREPOSITIONS_EN or w_lower in cls._EXTRA_VERBS_EN:
                     return False
                 if len(w_lower) > 3 and cls._VERB_SUFFIXES_EN.search(w_lower) and w_lower not in ("red", "bed", "led"):
@@ -353,6 +364,9 @@ class CommercialClaimVerifier:
             claim_clean = claim_part.strip() if claim_part else ""
             if pred_matched in cls._ADJECTIVE_PREDICATES_AR:
                 return claim_clean == ""
+
+            if re.search(r"[\-_\—\–]", claim_clean):
+                return False
 
             words = claim_clean.split()
             if not words:

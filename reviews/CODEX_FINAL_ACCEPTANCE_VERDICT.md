@@ -1,22 +1,26 @@
-# CC-001 independent acceptance verdict
+# Independent acceptance verdict: CHANGES_REQUESTED
 
-**CHANGES_REQUESTED** — Reviewed commit `6bddb756bd6d156bfd598067d3a0567c78dd1944` against `aea20e7`. CC-001 remains REVIEW_PENDING.
+Reviewed commit `2c38ada` against `6bddb75`, focusing on `catalog_copilot/verifier.py` and the requested inquiry handling. The working tree was clean at the start of review. This verdict does not certify the CC-001 lifecycle transition to ACCEPTED.
 
-## Finding: secondary predicates still bypass grounding (high)
+## High: Hyphenated secondary predicates bypass the inquiry grammar
 
-The new validator does not establish that the claim phrase contains no secondary verbs or predicates. In `catalog_copilot/verifier.py:261`, English checks a finite list of verbs, then accepts any remaining phrase of up to four words. Arabic checks only the enumerated predicates and auxiliaries at lines 313–319. Unlisted predicates therefore pass as if they were noun phrases, and the attributed inquiry is removed before grounding checks.
+The English complement validator permits internal hyphens (verifier.py:244), splits the claim phrase only on whitespace (line 282), and applies its preposition, verb and suffix checks to whole whitespace tokens (lines 303–308). Consequently `linked-to-cancer`, `known-to-cause-cancer`, and `proven-carcinogenic` each evade the checks and count as one word. The full verifier returns **PASS** for all of these inquiries when they are quoted in a draft:
 
-Reproduction: use a consented lead with the inquiry below, an active in-stock SKU-A priced at 100 SAR, and no catalog evidence about asbestos, cancer, or toxicity. Set the draft to `Regarding your question, "<inquiry>", Standard Item A is in stock for 100 SAR.` The full verifier returns **PASS** for each of:
+- `Is it true SKU-A contains asbestos linked-to-cancer?`
+- `Is it true SKU-A contains asbestos known-to-cause-cancer?`
+- `Is it true SKU-A contains asbestos proven-carcinogenic?`
 
-- `Is it true SKU-A contains asbestos linked to cancer?` — the reduced relative predicate `linked to cancer` is unchecked.
-- `هل صحيح أن SKU-A يحتوي اسبستوس يسبب السرطان؟` — the secondary predicate `يسبب السرطان` is unchecked.
-- `هل صحيح أن المنتج سام خطير؟` — the additional predicate `خطير` is unchecked.
+Reproduction: use a consented lead whose inquiry is the probe, a catalog containing active in-stock `SKU-A` at 100 SAR, and verify the draft `Regarding your question, "<probe>", Standard Item A is in stock for 100 SAR.` with target SKU `SKU-A`. The embedded reduced relative asserts an unverified health claim as background to the question; a PASS can permit human approval and dispatch despite the fail-closed requirement. The four exact Review 11 examples are addressed, but the general finding remains open.
 
-These violate the requested zero-secondary-predicate constraint and allow ungrounded statements to be repeated in a draft that passes verification. A finite blacklist plus a length limit cannot establish the required structure. Use a conservative, explicitly bounded grammar for claim phrases, or otherwise leave phrases whose structure cannot be established in the draft for grounding; add full-verifier regression tests for both languages.
+Token boundaries must prevent internal punctuation from hiding secondary verbs and prepositions. Reject ambiguous constructions or validate their components while preserving legitimate SKU handling; add full-verifier regression cases for these examples.
 
-## Assessment and verification
+## Grammar assessment
 
-- The listed Review 10 connective examples are addressed: the six requested adversarial probes returned **UNCERTAIN** in the full-verifier regression test. The additional `although`, `and`, Arabic temporal, and multiple-question cases in that test also returned UNCERTAIN. The broader finding remains unresolved because other secondary predicates still bypass the exemption.
-- All nine requested legitimate inquiries returned **PASS** in the same full-verifier test, using attributed inquiries and a grounded stock and price statement.
-- The implementation checks selected punctuation and connectives, an initial subject anchor and linking predicate, and a four-word maximum. Those checks do not prove the absence of other delimiters, connectives, secondary verbs, or predicates; the reproduced failures demonstrate the missing structural guarantee.
-- `python3 -m unittest discover -s tests -v`: **61 tests passed**. Passing the suite does not cover the counterexamples above.
+The implementation enforces the requested word-count bounds for the tested English and Arabic patterns, and catches the listed space-separated banned words and suffixes. It does not establish that accepted words are actually adjectives or nouns: the checks are token counts and finite deny lists. Internal hyphens further defeat those deny lists as demonstrated above. Arabic adjective predicates reject following words, and the listed secondary verbs and predicates are rejected in verb complements, but the noun requirement likewise is not independently established. These limitations mean the claimed general elimination of secondary predicates is not demonstrated.
+
+## Verification performed
+
+- Full verifier, quoted-question draft and consented lead: all four specified adversarial probes returned `UNCERTAIN`.
+- The nine specified legitimate inquiries returned `PASS` under the same full-verifier regression fixture.
+- `python3 -m unittest discover -s tests -v`: **61 tests passed**. The existing `test_codex_review10_truth_evaluating_questions_must_not_conceal_ungrounded_assertions` exercises all 13 specified probes through `verify`.
+- The three additional hyphenated probes above were run separately through `verify` and each returned `PASS`.
