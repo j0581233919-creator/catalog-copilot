@@ -133,14 +133,49 @@ class CommercialClaimVerifier:
         r")(?:\s+|$)",
     )
 
+    _TRUTH_EVALUATING_STARTERS = [
+        re.compile(r"^(?:is\s+it\s+(?:true|correct|accurate)(?:\s+that)?|can\s+you\s+confirm\s+(?:if|whether))\b", re.IGNORECASE),
+        re.compile(r"^(?:هل\s+صحيح\s+أن|هل\s+من\s+الصحيح\s+أن)\b"),
+    ]
+
+    _INQUIRY_TRANSACTIONAL_WORDS_EN = {
+        "i", "you", "we", "they", "he", "she", "it", "this", "that", "these", "those",
+        "a", "an", "the", "my", "your", "our", "their", "any", "some", "all",
+        "is", "are", "was", "were", "am", "be", "been", "being",
+        "do", "does", "did", "can", "could", "will", "would", "shall", "should", "may", "might", "must",
+        "have", "has", "had",
+        "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "much", "many",
+        "price", "cost", "costs", "pricing", "rate", "rates",
+        "stock", "available", "availability", "unavailable", "in", "out", "of", "ready",
+        "discount", "offer", "deal", "special", "promotion", "sale", "percent", "off",
+        "buy", "purchase", "order", "get", "shipping", "delivery", "deliver", "ship", "fast",
+        "hello", "hi", "dear", "please", "thank", "thanks", "item", "product", "unit", "units",
+        "sar", "usd", "aed", "egp", "eur", "gbp", "riyal", "riyals", "dollar", "dollars",
+        "for", "to", "at", "on", "with", "from", "by", "about",
+    }
+
+    _INQUIRY_TRANSACTIONAL_WORDS_AR = {
+        "هل", "ما", "ماذا", "من", "متى", "أين", "كيف", "كم", "أي", "أيها", "أينما", "لماذا", "لم",
+        "هو", "هي", "هم", "هن", "هذا", "هذه", "ذلك", "تلك", "هؤلاء", "أنا", "نحن", "أنت", "أنتم",
+        "متوفر", "متوفرة", "متاح", "متاحة", "توفر", "التوفر", "غير", "جاهز", "جاهزة",
+        "سعر", "السعر", "أسعار", "الأسعار", "قيمة", "القيمة", "تكلفة", "التكلفة", "بكم",
+        "خصم", "الخصم", "تخفيض", "عرض", "العرض", "عروض", "العروض", "خاص", "خاصة",
+        "شراء", "طلب", "الطلب", "توصيل", "التوصيل", "شحن", "الشحن", "شحنها", "توصيلها",
+        "منتج", "المنتج", "منتجات", "المنتجات", "صنف", "الصنف", "أصناف", "الأصناف",
+        "قطعة", "قطع", "حبة", "حبات", "وحدة", "وحدات",
+        "ريال", "درهم", "جنيه", "دولار", "يورو", "باوند",
+        "مرحبا", "مرحباً", "أهلاً", "اهلا", "وسهلاً", "وسهلا", "شكرا", "شكراً", "لو", "سمحت", "من", "فضلك",
+        "في", "من", "إلى", "على", "عن", "مع", "بـ", "لـ", "كـ",
+    }
+
     _CLAUSAL_CONNECTIVES_EN = re.compile(
         r"\b(?:"
         r"and|but|yet|so|or|plus|besides|"
-        r"as|since|because|"
+        r"as|since|because|for|"
         r"although|though|even\s+though|even\s+if|"
         r"given(?:\s+that)?|considering(?:\s+that)?|assuming(?:\s+that)?|knowing(?:\s+that)?|supposing(?:\s+that)?|provided(?:\s+that)?|"
-        r"while|whereas|despite|in\s+spite\s+of|seeing\s+that|inasmuch\s+as|"
-        r"as\s+well\s+as|in\s+addition\s+to|unless"
+        r"while|whilst|when|whenever|whether|whereas|despite|in\s+spite\s+of|seeing\s+that|inasmuch\s+as|"
+        r"as\s+well\s+as|in\s+addition\s+to|unless|lest|where|wherever"
         r")\b",
         re.IGNORECASE,
     )
@@ -153,10 +188,10 @@ class CommercialClaimVerifier:
     )
 
     @classmethod
-    def _is_pure_interrogative_clause(cls, text: str) -> bool:
+    def _is_pure_interrogative_clause(cls, text: str, allowed_tokens: Optional[Set[str]] = None) -> bool:
         """Determines if a clause is strictly an interrogative question without declarative assertions.
         Must end with ? or ؟, contain no internal sentence/clause boundaries or clausal connectives,
-        and start with an interrogative starter.
+        and either be an explicit truth-evaluating question or have all content words grounded in catalog/transactional vocabulary.
         """
         t = text.strip()
         if not t or not re.search(r"[\?؟]$", t):
@@ -164,11 +199,11 @@ class CommercialClaimVerifier:
 
         body = t[:-1].strip()
         # Must not contain internal punctuation that divides sentences or clauses:
-        # periods, exclamation, semicolons, colons, slashes, pipes, question marks, commas, newlines
-        if re.search(r"[\.!\;؛:?\n\r,،/\\|~^]", body):
+        # periods, exclamation, semicolons, colons, slashes, backslashes, pipes, question marks, commas, newlines, ampersands
+        if re.search(r"[\.!\;؛:?\n\r,،/\\|~^—–&＆]", body):
             return False
 
-        # Must not contain dash or em-dash boundaries (em-dash, en-dash, double dash, or hyphen with whitespace)
+        # Must not contain dash boundaries (em-dash, en-dash, double dash, or hyphen with whitespace)
         if re.search(r"[—–]|--|(?:\s-)|(?:-\s)", body):
             return False
 
@@ -176,24 +211,54 @@ class CommercialClaimVerifier:
         if cls._CLAUSAL_CONNECTIVES_EN.search(body) or cls._CLAUSAL_CONNECTIVES_AR.search(body):
             return False
 
-        # Must start with an interrogative question starter in English or Arabic
+        # Case A: Explicit truth-evaluating inquiry question (e.g. 'Is it true that SKU-A contains asbestos?')
+        is_truth_evaluating = any(p.search(body) for p in cls._TRUTH_EVALUATING_STARTERS)
+        if is_truth_evaluating:
+            return True
+
+        # Case B: Standard product inquiry question (e.g. 'Is it available?', 'Is SKU-A in stock?')
         is_en = bool(cls._INTERROGATIVE_STARTERS_EN.match(body))
         is_ar = bool(cls._INTERROGATIVE_STARTERS_AR.match(body))
-        return is_en or is_ar
+        if not (is_en or is_ar):
+            return False
+
+        # Whitelist verification: all content words must be grounded in catalog or inquiry transactional vocabulary
+        if allowed_tokens is not None:
+            allowed = allowed_tokens | cls._INQUIRY_TRANSACTIONAL_WORDS_EN | cls._INQUIRY_TRANSACTIONAL_WORDS_AR
+            clean_body = body.translate(_ARABIC_INDIC_DIGITS)
+            for w in re.findall(r"[\w\-]+", clean_body):
+                w_lower = w.lower()
+                if w.isdigit() or re.match(r"^\d+(?:\.\d+)?$", w):
+                    continue
+                if w_lower in cls._CURRENCY_NORM or w.upper() in cls._CURRENCY_NORM:
+                    continue
+                if len(w_lower) <= 1:
+                    continue
+                w_norm = normalize_arabic_text(w_lower) if re.search(r"[\u0621-\u064A]", w) else w_lower
+                w_variants = {w_lower, w_norm}
+                if re.search(r"[\u0621-\u064A]", w):
+                    for prefix in ("وال", "بال", "لل", "ال", "و", "ب", "ل"):
+                        if w_norm.startswith(prefix) and len(w_norm) > len(prefix) + 1:
+                            w_variants.add(w_norm[len(prefix):])
+                if not any(v in allowed for v in w_variants):
+                    # Unverified content word in product question -> assertion-bearing -> fail closed!
+                    return False
+
+        return True
 
     @classmethod
-    def _extract_pure_interrogative_clauses(cls, text: str) -> List[str]:
+    def _extract_pure_interrogative_clauses(cls, text: str, allowed_tokens: Optional[Set[str]] = None) -> List[str]:
         """Extracts genuine, isolated interrogative question clauses from customer text."""
         valid_clauses = []
         pattern = (
-            r"(?:^|[\.!\;؛:\n\r,،/\\|~^—–]|--|(?:\s-)|(?:-\s)"
-            r"|\b(?:and|but|yet|so|or|plus|besides|as|since|because|although|though|even\s+though|given|while|whereas)\b"
+            r"(?:^|[\.!\;؛:\n\r,،/\\|~^—–&＆]|--|(?:\s-)|(?:-\s)"
+            r"|\b(?:and|but|yet|so|or|plus|besides|as|since|because|although|though|even\s+though|given|while|whilst|when|whereas)\b"
             r"|\b(?:مع\s+أن|رغم\s+أن|بما\s+أن|حيث\s+أن|لأن|لكن|ولكن)\b|\s+(?:و|أو|لكن)\s+)"
-            r"\s*([^.!?؛;:\n\r,،/\\|~^—–]+?[\?؟])"
+            r"\s*([^.!?؛;:\n\r,،/\\|~^—–&＆]+?[\?؟])"
         )
         for match in re.finditer(pattern, text, re.IGNORECASE):
             candidate = match.group(1).strip()
-            if cls._is_pure_interrogative_clause(candidate):
+            if cls._is_pure_interrogative_clause(candidate, allowed_tokens=allowed_tokens):
                 valid_clauses.append(candidate)
         return valid_clauses
 
@@ -351,6 +416,18 @@ class CommercialClaimVerifier:
         if catalog_item:
             cat_desc = f"{catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}".lower()
 
+        # Comprehensive vocabulary and assertion grounding check:
+        # Every content word in the draft must be grounded in catalog item data or transactional boilerplate.
+        allowed_tokens = set(self._TRANSACTIONAL_WORDS_EN) | set(self._TRANSACTIONAL_WORDS_AR)
+        if catalog_item:
+            catalog_raw = f"{catalog_item.sku} {catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}"
+            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", catalog_raw))
+            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", catalog_raw))
+
+        if lead.customer_name:
+            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.customer_name))
+            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", lead.customer_name))
+
         # Strict validation of customer inquiry quotations:
         # A merchant draft may quote a customer's inquiry only when:
         # 1. The inquiry exists, and the quoted text is the exact inquiry or a full interrogative question clause.
@@ -363,7 +440,7 @@ class CommercialClaimVerifier:
         inquiry_raw = (lead.inquiry_text or "").strip()
         inquiry_clean = re.sub(r"\s+", " ", inquiry_raw).strip()
         is_inquiry_question = bool(re.search(r"[\?؟]", inquiry_clean))
-        valid_inquiry_clauses = self._extract_pure_interrogative_clauses(inquiry_clean) if is_inquiry_question else []
+        valid_inquiry_clauses = self._extract_pure_interrogative_clauses(inquiry_clean, allowed_tokens=allowed_tokens) if is_inquiry_question else []
 
         attribution_prefixes = [
             re.compile(r"(?:regarding|about|for|answering|in response to)\s+(?:your\s+)?(?:question|inquiry|inquiries)\s*[:,\-]?\s*$", re.IGNORECASE),
@@ -379,7 +456,7 @@ class CommercialClaimVerifier:
                 return f" {span_content} "
 
             # 1. The quoted text MUST be an isolated pure interrogative clause (no declarative assertions, no mixed clauses)
-            if not self._is_pure_interrogative_clause(span_clean):
+            if not self._is_pure_interrogative_clause(span_clean, allowed_tokens=allowed_tokens):
                 return f" {span_content} "
 
             # 2. Must match an isolated pure interrogative question clause extracted from customer inquiry
@@ -443,16 +520,6 @@ class CommercialClaimVerifier:
 
         # Comprehensive vocabulary and assertion grounding check:
         # Every content word in the draft must be grounded in catalog item data or transactional boilerplate.
-        allowed_tokens = set(self._TRANSACTIONAL_WORDS_EN) | set(self._TRANSACTIONAL_WORDS_AR)
-        if catalog_item:
-            catalog_raw = f"{catalog_item.sku} {catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}"
-            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", catalog_raw))
-            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", catalog_raw))
-
-        if lead.customer_name:
-            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.customer_name))
-            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", lead.customer_name))
-
         # Note: Customer inquiry text is NEVER added to allowed vocabulary because customer questions
         # cannot authorize product claims. Inquiries may only appear in explicit quotes ('...').
         sentences = [s.strip() for s in re.split(r"[\n.!?؛\r]+", draft_text_unquoted) if s.strip()]

@@ -1004,6 +1004,11 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             'Is it available—SKU-A contains asbestos?',
             'Is it available -SKU-A contains asbestos?',
             'Is it available given SKU-A contains asbestos?',
+            'Is it available whilst SKU-A contains asbestos?',
+            'Is it available because SKU-A contains asbestos?',
+            'Is it available when SKU-A contains asbestos?',
+            'Is it available despite the fact SKU-A contains asbestos?',
+            'Is it available ＆ SKU-A contains asbestos?',
             'هل هو متوفر لأن المنتج يحتوي أسبستوس؟',
             'هل هو متوفر مع أن المنتج يحتوي أسبستوس؟',
         ]:
