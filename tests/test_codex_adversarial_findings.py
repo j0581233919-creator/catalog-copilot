@@ -303,7 +303,7 @@ class TestCodexAdversarialFindings(unittest.TestCase):
                 "batch_manifest_id": manifest_id,
                 "draft_id": "DRAFT-FAILSAFE-01",
                 "lead_id": "LEAD-FAILSAFE-01",
-                "customer_name": "Failsafe Tester",
+                "customer_name": "Failsafe User",
                 "contact_channel": "email",
                 "contact_target": "failsafe@example.com",
                 "sku": "SKU-A",
@@ -781,7 +781,31 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             "Quoting customer question as an affirmative assertion without question mark must be UNCERTAIN.",
         )
 
-        # 2. Preserving the customer's full question with interrogative mark MUST PASS
+        # 2. Declarative customer statement (no question mark) can NEVER be exempted as an inquiry quote
+        declarative_lead = LeadInquiry(
+            lead_id="LEAD-INQ-DECL",
+            customer_name="Decl Customer",
+            contact_channel="email",
+            contact_target="decl@example.com",
+            consent_to_contact=True,
+            consent_evidence="Web form opt-in 2026-11-10",
+            preferred_language="en",
+            inquiry_text="SKU-A contains asbestos.",  # Declarative assertion!
+            requested_sku="SKU-A",
+        )
+        report_decl = self.verifier.verify(
+            lead=declarative_lead,
+            catalog=self.catalog,
+            draft_text='Regarding your question, "SKU-A contains asbestos." Standard Item A is in stock for 100 SAR.',
+            target_sku="SKU-A",
+        )
+        self.assertEqual(
+            report_decl.status,
+            VerificationStatus.UNCERTAIN,
+            "Quoting customer declarative assertion without interrogative inquiry must fail closed to UNCERTAIN.",
+        )
+
+        # 3. Preserving the customer's full question with interrogative mark MUST PASS
         draft_question = 'Regarding your question, "Is it true SKU-A contains asbestos?", Standard Item A is in stock for 100 SAR.'
         report_question = self.verifier.verify(
             lead=inquiry_lead,
@@ -840,7 +864,44 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         self.assertEqual(len(rec_stats["recovered"]), 0, "Duplicate draft IDs must NOT be recovered.")
         self.assertEqual(len(rec_stats["released"]), 0, "Ambiguous batch must NOT be released.")
 
-        # 2. Write CSV with complete schema and matching records
+        # 2. Write CSV with altered contact_channel (email -> sms)
+        fieldnames = [
+            "batch_manifest_id", "draft_id", "lead_id", "customer_name",
+            "contact_channel", "contact_target", "sku", "language", "subject",
+            "body", "reviewed_by", "reviewed_at", "approval_status",
+            "consent_to_contact", "consent_evidence"
+        ]
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            for did in ["DRAFT-DUP-1", "DRAFT-DUP-2"]:
+                w.writerow({
+                    "batch_manifest_id": tok,
+                    "draft_id": did,
+                    "lead_id": f"LEAD-{did}",
+                    "customer_name": "Dup User",
+                    "contact_channel": "sms" if did == "DRAFT-DUP-1" else "email",  # Altered!
+                    "contact_target": "dup@example.com",
+                    "sku": "SKU-A",
+                    "language": "en",
+                    "subject": "Subj",
+                    "body": "Standard Item A is in stock for 100 SAR.",
+                    "reviewed_by": "Admin Reviewer",
+                    "reviewed_at": "2026-11-10T00:00:00Z",
+                    "approval_status": "APPROVED",
+                    "consent_to_contact": "1",
+                    "consent_evidence": "Evidence #999",
+                })
+        rec_altered = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_altered["recovered"]), 0, "Altered channel record must NOT be recovered.")
+
+        # 3. Write CSV with duplicate headers
+        with open(csv_dest, "w", encoding="utf-8") as f:
+            f.write("batch_manifest_id,draft_id,draft_id\n" + f"{tok},DRAFT-DUP-1,DRAFT-DUP-1\n")
+        rec_dup_hdr = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_dup_hdr["recovered"]), 0, "Duplicate CSV headers must NOT be recovered.")
+
+        # 4. Write CSV with complete schema and matching records
         fieldnames = [
             "batch_manifest_id", "draft_id", "lead_id", "customer_name",
             "contact_channel", "contact_target", "sku", "language", "subject",

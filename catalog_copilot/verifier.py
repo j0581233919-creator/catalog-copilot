@@ -297,13 +297,17 @@ class CommercialClaimVerifier:
             if not inquiry_clean or len(span_clean) < 3:
                 return f" {span_content} "
 
-            # 1. If inquiry was a question, the quote MUST preserve the interrogative meaning (? or ؟)
-            has_question_mark = bool(re.search(r"[\?؟]", span_clean))
-            if is_inquiry_question and not has_question_mark:
-                # Quoting without question mark turns a question into an assertion: REJECT
+            # 1. Declarative customer statements can NEVER be exempted from grounding.
+            # The customer inquiry MUST be an actual interrogative question (? or ؟).
+            if not is_inquiry_question:
                 return f" {span_content} "
 
-            # 2. Quote must match the customer's inquiry text (case-insensitive) or an exact question sentence
+            # 2. The quotation MUST preserve the interrogative meaning (? or ؟).
+            has_question_mark = bool(re.search(r"[\?؟]", span_clean))
+            if not has_question_mark:
+                return f" {span_content} "
+
+            # 3. Quote must match the customer's inquiry text (case-insensitive) or an exact question sentence
             inquiry_sentences = [s.strip() for s in re.split(r"[\n\r]+", inquiry_clean) if s.strip()]
             matches_inquiry = (
                 span_clean.lower() == inquiry_clean.lower()
@@ -312,14 +316,14 @@ class CommercialClaimVerifier:
             if not matches_inquiry:
                 return f" {span_content} "
 
-            # 3. Must be immediately preceded by attribution framing in the draft text
+            # 4. Must be immediately preceded by attribution framing in the draft text
             preceding_text = draft_text[:match.start()].strip()
             last_tokens = " ".join(preceding_text.split()[-8:]) if preceding_text else ""
             has_immediate_attribution = any(p.search(last_tokens) for p in attribution_prefixes)
             if not has_immediate_attribution:
                 return f" {span_content} "
 
-            # Validated customer inquiry quote: safe to strip from merchant assertion checks
+            # Validated customer inquiry question: safe to strip from merchant assertion checks
             return " "
 
         draft_text_unquoted = quote_pattern.sub(_strip_if_valid_quote, draft_text)

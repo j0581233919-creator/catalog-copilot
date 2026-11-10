@@ -56,6 +56,16 @@ def _is_proven_published_for_token(
 
     try:
         with open(p, "r", encoding="utf-8") as f:
+            raw_reader = csv.reader(f)
+            try:
+                raw_headers = next(raw_reader)
+            except StopIteration:
+                return False
+            # Reject CSV if duplicate headers exist
+            if len(raw_headers) != len(set(raw_headers)):
+                return False
+
+            f.seek(0)
             reader = csv.DictReader(f)
             fieldnames = set(reader.fieldnames or [])
             if not set(REQUIRED_EXPORT_COLUMNS).issubset(fieldnames):
@@ -100,7 +110,7 @@ def _is_proven_published_for_token(
                 if seen_draft_set != set(expected_draft_ids):
                     return False
 
-            # Validate exact draft contents against database draft records
+            # Validate exact draft contents against database draft records across all dispatch-relevant fields
             if expected_drafts is not None:
                 if len(seen_draft_ids) != len(expected_drafts):
                     return False
@@ -108,13 +118,25 @@ def _is_proven_published_for_token(
                     r = rows_by_id.get(exp_draft.draft_id)
                     if not r:
                         return False
-                    if r.get("lead_id") != exp_draft.lead_id:
+                    if (r.get("lead_id") or "").strip() != (exp_draft.lead_id or "").strip():
                         return False
-                    if r.get("contact_target") != exp_draft.contact_target:
+                    if (r.get("customer_name") or "").strip() != (exp_draft.customer_name or "").strip():
                         return False
-                    if r.get("body") != exp_draft.body:
+                    if (r.get("contact_channel") or "").strip() != (exp_draft.contact_channel or "").strip():
                         return False
-                    if r.get("consent_evidence") != exp_draft.consent_evidence:
+                    if (r.get("contact_target") or "").strip() != (exp_draft.contact_target or "").strip():
+                        return False
+                    if (r.get("sku") or "").strip() != (exp_draft.sku or "").strip():
+                        return False
+                    if (r.get("language") or "").strip() != (exp_draft.language or "").strip():
+                        return False
+                    if (r.get("subject") or "").strip() != (exp_draft.subject or "").strip():
+                        return False
+                    if (r.get("body") or "").strip() != (exp_draft.body or "").strip():
+                        return False
+                    if (r.get("reviewed_by") or "").strip() != (exp_draft.reviewed_by or "").strip():
+                        return False
+                    if (r.get("consent_evidence") or "").strip() != (exp_draft.consent_evidence or "").strip():
                         return False
 
             return True
