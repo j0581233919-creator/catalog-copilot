@@ -1146,6 +1146,8 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             'Is it true SKU-A contains asbestos proven-carcinogenic?',
             'هل صحيح أن SKU-A يحتوي اسبستوس يسبب السرطان؟',
             'هل صحيح أن المنتج سام خطير؟',
+            'هل صحيح أن SKU-A يحتوي اسبستوس‐مادة؟',
+            'هل صحيح أن SKU-A يحتوي اسبستوس−مادة؟',
         ]
 
         for probe in adversarial_probes:
@@ -1164,6 +1166,7 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             'Is it true SKU-A contains asbestos?',
             'Is it true that the product contains asbestos?',
             'Can you confirm whether SKU-A is waterproof?',
+            'Is it true SKU-A has a 2-year warranty?',
             'هل الصنف متوفر؟',
             'هل صحيح أن SKU-A يحتوي اسبستوس؟',
             'هل صحيح أن المنتج سام؟',

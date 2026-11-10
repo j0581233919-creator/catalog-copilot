@@ -365,7 +365,9 @@ class CommercialClaimVerifier:
             if pred_matched in cls._ADJECTIVE_PREDICATES_AR:
                 return claim_clean == ""
 
-            if re.search(r"[\-_\—\–]", claim_clean):
+            # Whitelist: Arabic claim text must strictly consist of Arabic letters, digits, and spaces only.
+            # All hyphens, dashes (including U+2010, U+2212, em/en dash), underscores, and punctuation are rejected.
+            if not re.match(r"^[\u0600-\u06FF\s0-9]+$", claim_clean):
                 return False
 
             words = claim_clean.split()

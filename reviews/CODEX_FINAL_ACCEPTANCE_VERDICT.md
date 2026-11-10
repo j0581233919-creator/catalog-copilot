@@ -1,26 +1,25 @@
 # Independent acceptance verdict: CHANGES_REQUESTED
 
-Reviewed commit `2c38ada` against `6bddb75`, focusing on `catalog_copilot/verifier.py` and the requested inquiry handling. The working tree was clean at the start of review. This verdict does not certify the CC-001 lifecycle transition to ACCEPTED.
+Reviewed commit `a392b09` against `2c38ada`. The working tree was clean at the start of the review. CC-001 is not accepted.
 
-## High: Hyphenated secondary predicates bypass the inquiry grammar
+## Finding: Arabic claim validation permits other Unicode hyphens and dashes
 
-The English complement validator permits internal hyphens (verifier.py:244), splits the claim phrase only on whitespace (line 282), and applies its preposition, verb and suffix checks to whole whitespace tokens (lines 303–308). Consequently `linked-to-cancer`, `known-to-cause-cancer`, and `proven-carcinogenic` each evade the checks and count as one word. The full verifier returns **PASS** for all of these inquiries when they are quoted in a draft:
+**Medium — `catalog_copilot/verifier.py:368–378`.** The new Arabic check rejects ASCII hyphen-minus, underscore, em dash and en dash, but does not reject other dash characters. The subsequent whitespace split treats a compound containing one of these characters as one word. In the full verifier, both of the following returned **PASS**, contrary to the requirement that Arabic claim phrases disallow hyphens and dashes:
 
-- `Is it true SKU-A contains asbestos linked-to-cancer?`
-- `Is it true SKU-A contains asbestos known-to-cause-cancer?`
-- `Is it true SKU-A contains asbestos proven-carcinogenic?`
+- `هل صحيح أن SKU-A يحتوي اسبستوس‐مادة؟` (U+2010 HYPHEN)
+- `هل صحيح أن SKU-A يحتوي اسبستوس−مادة؟` (U+2212 MINUS SIGN)
 
-Reproduction: use a consented lead whose inquiry is the probe, a catalog containing active in-stock `SKU-A` at 100 SAR, and verify the draft `Regarding your question, "<probe>", Standard Item A is in stock for 100 SAR.` with target SKU `SKU-A`. The embedded reduced relative asserts an unverified health claim as background to the question; a PASS can permit human approval and dispatch despite the fail-closed requirement. The four exact Review 11 examples are addressed, but the general finding remains open.
+Reproduction: use a consented lead whose inquiry is the probe, an active in-stock `SKU-A` priced at 100 SAR, and verify `Regarding your question, "<probe>", Standard Item A is in stock for 100 SAR.` with target SKU `SKU-A`. The accepted character can join words into an unchecked compound, undermining the intended fail-closed boundary. Reject Unicode dash/hyphen variants in Arabic claim text or constrain the permitted characters, and add full-verifier regressions. Preserve the ASCII hyphen in the SKU subject.
 
-Token boundaries must prevent internal punctuation from hiding secondary verbs and prepositions. Reject ambiguous constructions or validate their components while preserving legitimate SKU handling; add full-verifier regression cases for these examples.
+## Review 12 and English validation
 
-## Grammar assessment
-
-The implementation enforces the requested word-count bounds for the tested English and Arabic patterns, and catches the listed space-separated banned words and suffixes. It does not establish that accepted words are actually adjectives or nouns: the checks are token counts and finite deny lists. Internal hyphens further defeat those deny lists as demonstrated above. Arabic adjective predicates reject following words, and the listed secondary verbs and predicates are rejected in verb complements, but the noun requirement likewise is not independently established. These limitations mean the claimed general elimination of secondary predicates is not demonstrated.
+The three reported hyphenated secondary predicates now return **UNCERTAIN** through the full verifier: `linked-to-cancer`, `known-to-cause-cancer`, and `proven-carcinogenic`. The English claim phrase is checked against the requested character pattern; each ASCII-hyphenated token must match the numeric measurement pattern; and alphabetic subwords are checked against the preposition and extra-verb lists and the `-ed`/`-ing` suffix rule, with existing short-word exceptions. These rules address the reported examples. They are heuristic filters, not proof that every possible secondary predicate is recognized.
 
 ## Verification performed
 
-- Full verifier, quoted-question draft and consented lead: all four specified adversarial probes returned `UNCERTAIN`.
-- The nine specified legitimate inquiries returned `PASS` under the same full-verifier regression fixture.
-- `python3 -m unittest discover -s tests -v`: **61 tests passed**. The existing `test_codex_review10_truth_evaluating_questions_must_not_conceal_ungrounded_assertions` exercises all 13 specified probes through `verify`.
-- The three additional hyphenated probes above were run separately through `verify` and each returned `PASS`.
+All probes used the full `verify` method with the consented catalog fixture and quoted-question draft described above.
+
+- All seven requested adversarial inquiries returned **UNCERTAIN**, including the three hyphenated English examples, the two space-separated English examples, and both Arabic examples.
+- All ten requested legitimate inquiries returned **PASS**, including the `2-year warranty` question. This warranty case was checked separately; it is not in the existing pure-inquiry regression list.
+- `python3 -m unittest discover -s tests -v`: **61 tests passed**.
+- The two additional Unicode Arabic punctuation probes above returned **PASS**, establishing the remaining finding despite the passing suite.
