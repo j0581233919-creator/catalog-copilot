@@ -529,6 +529,206 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         self.assertEqual(success_count, 1)
         self.assertEqual(ledger.get_draft("DRAFT-OWNERSHIP-1").approval_status, ApprovalStatus.EXPORTED)
 
+    def test_codex_review4_finding1_fully_quoted_unsupported_claim_fails_closed(self):
+        """Review 4 Finding 1: Quoting an ungrounded claim like '"SKU-A contains asbestos."' must return UNCERTAIN."""
+        inquiry_lead = LeadInquiry(
+            lead_id="LEAD-INQ-Q",
+            customer_name="Quoted Customer",
+            contact_channel="email",
+            contact_target="quoted@example.com",
+            consent_to_contact=True,
+            consent_evidence="Web form opt-in 2026-11-10",
+            preferred_language="en",
+            inquiry_text="Is it true SKU-A contains asbestos?",
+            requested_sku="SKU-A",
+        )
+
+        # 1. Fully quoted ungrounded assertion MUST NOT bypass grounding!
+        report_quoted = self.verifier.verify(
+            lead=inquiry_lead,
+            catalog=self.catalog,
+            draft_text='"SKU-A contains asbestos."',
+            target_sku="SKU-A",
+        )
+        self.assertEqual(
+            report_quoted.status,
+            VerificationStatus.UNCERTAIN,
+            "Quotation marks must never bypass grounding of merchant assertions.",
+        )
+
+        # 2. Quoted text alone with no merchant response must fail closed
+        report_alone = self.verifier.verify(
+            lead=inquiry_lead,
+            catalog=self.catalog,
+            draft_text='"Is it true SKU-A contains asbestos?"',
+            target_sku="SKU-A",
+        )
+        self.assertIn(
+            report_alone.status,
+            (VerificationStatus.UNCERTAIN, VerificationStatus.FAIL),
+            "Quoting customer text with zero merchant response must fail closed.",
+        )
+
+    def test_codex_review4_finding2_stale_companion_manifest_collision_resolves_without_duplicate_dispatch(self):
+        """Review 4 Finding 2: Pre-existing stale manifest must NOT cause published CSV to be released or duplicated."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-STALE-MF-1",
+            lead_id="LEAD-STALE-MF-1",
+            customer_name="Stale Manifest User",
+            contact_channel="email",
+            contact_target="stalemf@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Ready",
+            body="Standard Item A is in stock for 100 SAR.",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Standard Item A is in stock for 100 SAR.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Opt-in #2020",
+        )
+        ledger.save_draft(draft)
+        ledger.approve("DRAFT-STALE-MF-1", reviewer="Reviewer StaleMF")
+
+        test_dir = os.path.join(self.tmp_dir.name, "stale_manifest_dir")
+        os.makedirs(test_dir, exist_ok=True)
+        csv_dest = os.path.join(test_dir, "dispatch.csv")
+        manifest_dest = os.path.join(test_dir, "dispatch.manifest.json")
+
+        # Simulate pre-existing stale companion manifest from an older run
+        with open(manifest_dest, "w", encoding="utf-8") as mf:
+            json.dump({"batch_manifest_id": "EXP-OLD-STALE-TOKEN", "record_count": 0}, mf)
+
+        # Export without overwrite must detect manifest collision upfront
+        with self.assertRaises(FileExistsError):
+            engine.export_approved_to_csv(csv_dest, overwrite=False)
+
+        # Now export with overwrite=True to cleanly resolve and replace the stale manifest
+        count = engine.export_approved_to_csv(csv_dest, overwrite=True)
+        self.assertEqual(count, 1)
+
+        # Draft must be EXPORTED in ledger
+        self.assertEqual(ledger.get_draft("DRAFT-STALE-MF-1").approval_status, ApprovalStatus.EXPORTED)
+
+        # Manifest must now match the active batch manifest ID, not the old stale token
+        with open(manifest_dest, "r", encoding="utf-8") as mf:
+            mf_data = json.load(mf)
+        self.assertNotEqual(mf_data["batch_manifest_id"], "EXP-OLD-STALE-TOKEN")
+
+        # Export queue must now be empty (never duplicate)
+        self.assertEqual(len(ledger.get_approved_for_dispatch()), 0)
+
+    def test_codex_review4_finding3_accurate_audit_log_prior_status(self):
+        """Review 4 Finding 3: Transitioning EDITED_AND_APPROVED must log exact previous_status in audit log."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-AUDIT-EDIT",
+            lead_id="LEAD-AUDIT-EDIT",
+            customer_name="Audit Tester",
+            contact_channel="email",
+            contact_target="audit@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Order",
+            body="Initial Body",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Standard Item A is in stock for 100 SAR.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Evidence #555",
+        )
+        ledger.save_draft(draft)
+        ledger.edit_and_approve(
+            draft_id="DRAFT-AUDIT-EDIT",
+            new_body="Standard Item A is in stock for 100.00 SAR.",
+            reviewer="Reviewer Editor",
+            catalog=self.catalog,
+        )
+
+        db_draft = ledger.get_draft("DRAFT-AUDIT-EDIT")
+        self.assertEqual(db_draft.approval_status, ApprovalStatus.EDITED_AND_APPROVED)
+
+        # Reserve and mark exported
+        tok = "EXP-AUDIT-TOK"
+        ledger.reserve_for_export(batch_manifest_id=tok, export_destination="/tmp/audit.csv")
+        updated = ledger.mark_exported(["DRAFT-AUDIT-EDIT"], batch_manifest_id=tok)
+        self.assertEqual(updated, 1)
+
+        # Inspect audit logs for exact previous_status
+        audit_events = ledger.get_audit_history("DRAFT-AUDIT-EDIT")
+        export_events = [e for e in audit_events if e["action"] == "EXPORTED"]
+        self.assertEqual(len(export_events), 1)
+        self.assertEqual(
+            export_events[0]["previous_status"],
+            ApprovalStatus.EDITED_AND_APPROVED.value,
+            "Audit event must accurately record EDITED_AND_APPROVED as previous_status.",
+        )
+
+    def test_codex_review4_finding4_recovery_rejects_truncated_batch(self):
+        """Review 4 Finding 4: Incomplete/truncated CSV missing expected drafts must NOT be recovered."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        # Create two drafts
+        for did in ["DRAFT-BATCH-1", "DRAFT-BATCH-2"]:
+            d = DraftMessage(
+                draft_id=did,
+                lead_id=f"LEAD-{did}",
+                customer_name="Batch User",
+                contact_channel="email",
+                contact_target="batch@example.com",
+                sku="SKU-A",
+                language="en",
+                subject="Subj",
+                body="Standard Item A is in stock for 100 SAR.",
+                verification_report=self.verifier.verify(
+                    lead=self.lead_consented,
+                    catalog=self.catalog,
+                    draft_text="Standard Item A is in stock for 100 SAR.",
+                    target_sku="SKU-A",
+                ),
+                consent_to_contact=True,
+                consent_evidence="Evidence #999",
+            )
+            ledger.save_draft(d)
+            ledger.approve(did, reviewer="Admin Reviewer")
+
+        test_dir = os.path.join(self.tmp_dir.name, "trunc_batch_dir")
+        os.makedirs(test_dir, exist_ok=True)
+        csv_dest = os.path.join(test_dir, "batch.csv")
+
+        tok = "EXP-TRUNC-TOK"
+        reserved = ledger.reserve_for_export(batch_manifest_id=tok, export_destination=csv_dest)
+        self.assertEqual(len(reserved), 2)
+
+        # Write truncated CSV containing ONLY DRAFT-BATCH-1 (missing DRAFT-BATCH-2)
+        with open(csv_dest, "w", encoding="utf-8") as f:
+            f.write(f"batch_manifest_id,draft_id,lead_id\n{tok},DRAFT-BATCH-1,LEAD-1\n")
+
+        # Recovery must reject the truncated batch: neither finalize nor release it
+        rec_stats = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_stats["recovered"]), 0, "Truncated batch must NOT be marked recovered.")
+        self.assertEqual(len(rec_stats["released"]), 0, "Truncated batch must NOT be released back to queue.")
+
+        # Both drafts must remain reserved under tok
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT draft_id, approval_status, reservation_token FROM drafts WHERE reservation_token = ?", (tok,))
+            rows = cursor.fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0][1], ApprovalStatus.APPROVED.value)
+            self.assertEqual(rows[1][1], ApprovalStatus.APPROVED.value)
+
 
 if __name__ == "__main__":
     unittest.main()

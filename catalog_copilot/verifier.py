@@ -271,9 +271,45 @@ class CommercialClaimVerifier:
         if catalog_item:
             cat_desc = f"{catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}".lower()
 
-        # Customer inquiries must NEVER authorize merchant assertions. Echoed customer inquiries
-        # may appear inside explicit quotes ("..." or '...'). We strip unquoted text for merchant claim verification.
-        draft_text_unquoted = re.sub(r'(?<!\w)[\'\"«»“”](.+?)[\'\"«»“”](?!\w)', ' ', draft_text)
+        # Strict validation of customer inquiry quotations:
+        # A merchant draft may quote a customer's inquiry only when:
+        # 1. The inquiry exists and the quoted text is genuinely a normalized substring of the customer's inquiry.
+        # 2. The quote is framed in inquiry-referencing attribution (e.g., 'regarding your question', 'inquiry', etc.).
+        # 3. The draft is not merely the quote, but contains grounded merchant response text.
+        # Any quoted text that does not meet these criteria is treated as an assertion made by the merchant
+        # and MUST be grounded in catalog facts.
+        quote_pattern = re.compile(r'(?<!\w)[\'\"«»“”](.+?)[\'\"«»“”](?!\w)')
+        inquiry_raw = (lead.inquiry_text or "").strip()
+        inquiry_norm = re.sub(r"[^\w\s]", "", inquiry_raw.lower())
+
+        attribution_markers = {
+            "regarding", "inquiry", "inquiring", "question", "questions", "asking", "asked",
+            "بخصوص", "استفسار", "استفساركم", "استفساراتكم", "سؤال", "سؤالكم", "وسؤالكم",
+        }
+        draft_words_lower = set(re.findall(r"[\w\-]+", draft_text.lower()))
+        has_attribution = bool(draft_words_lower & attribution_markers)
+
+        def _strip_if_valid_quote(match: re.Match) -> str:
+            span_content = match.group(1).strip()
+            span_norm = re.sub(r"[^\w\s]", "", span_content.lower())
+            if inquiry_norm and len(span_norm) >= 3 and span_norm in inquiry_norm and has_attribution:
+                return " "
+            # Not an attributed inquiry quotation: keep content so it is validated as a merchant claim!
+            return f" {span_content} "
+
+        draft_text_unquoted = quote_pattern.sub(_strip_if_valid_quote, draft_text)
+
+        # Fail closed if draft contains solely an inquiry quote with no merchant content
+        if len(draft_text_unquoted.strip()) < 10:
+            checks.append(ClaimVerification(
+                claim_type=ClaimType.UNGROUNDED_CLAIM,
+                claimed_value=draft_text,
+                catalog_value=None,
+                is_valid=False,
+                notes="Draft consists only of quoted customer text with no grounded merchant response.",
+            ))
+            reasons.append("Draft lacks grounded merchant response body.")
+            overall_status = VerificationStatus.FAIL
 
         for pattern in self._UNGROUNDED_PATTERNS:
             match = pattern.search(draft_text_unquoted)

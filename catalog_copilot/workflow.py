@@ -137,10 +137,15 @@ class BatchWorkflowEngine:
         out_p = Path(output_csv_path).resolve()
         manifest_p = out_p.with_suffix(".manifest.json")
 
-        if out_p.exists() and not overwrite:
-            raise FileExistsError(
-                f"Export destination '{out_p}' already exists. To prevent overwriting active dispatch queues, specify a new path or set overwrite=True."
-            )
+        if not overwrite:
+            if out_p.exists():
+                raise FileExistsError(
+                    f"Export destination '{out_p}' already exists. To prevent overwriting active dispatch queues, specify a new path or set overwrite=True."
+                )
+            if manifest_p.exists():
+                raise FileExistsError(
+                    f"Export companion manifest '{manifest_p}' already exists. To prevent collision with active dispatch queues, specify a new path or set overwrite=True."
+                )
 
         batch_manifest_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"
 
@@ -246,9 +251,11 @@ class BatchWorkflowEngine:
                     os.unlink(tmp_mf_path)
                     tmp_mf_path = None
                 except FileExistsError:
-                    raise FileExistsError(
-                        f"Export manifest '{manifest_p}' already exists. To prevent overwriting active dispatch queues, specify a new path or set overwrite=True."
-                    )
+                    # CSV is already durably published to out_p! The CSV is the primary dispatch artifact.
+                    # A stale companion manifest must not cause the published CSV to be released or duplicated.
+                    # Atomically replace the stale manifest with this batch's matching manifest.
+                    os.replace(tmp_mf_path, manifest_p)
+                    tmp_mf_path = None
 
             # 5. Commit export status in ledger
             if mark_as_exported:
@@ -259,13 +266,10 @@ class BatchWorkflowEngine:
         except Exception:
             # Reconcile publication status before any cleanup or release:
             # Only finalize if THIS worker's CSV publication succeeded and matches token identity!
-            if published_csv and _is_proven_published_for_token(out_p, batch_manifest_id):
+            if published_csv and _is_proven_published_for_token(out_p, batch_manifest_id, expected_draft_ids=draft_ids):
                 if tmp_mf_path and os.path.exists(tmp_mf_path):
                     try:
-                        if not manifest_p.exists():
-                            os.replace(tmp_mf_path, manifest_p)
-                        else:
-                            os.remove(tmp_mf_path)
+                        os.replace(tmp_mf_path, manifest_p)
                     except Exception:
                         pass
                 # Finalize export so messages are never duplicated

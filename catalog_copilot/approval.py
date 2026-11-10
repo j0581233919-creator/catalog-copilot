@@ -19,9 +19,15 @@ from .catalog import Catalog
 from .verifier import CommercialClaimVerifier
 
 
-def _is_proven_published_for_token(dest_path: Union[str, Path], batch_manifest_id: str) -> bool:
-    """Verifies that the file at dest_path is a valid publication belonging to batch_manifest_id.
-    Prevents foreign files or collisions from falsely finalizing reservations.
+def _is_proven_published_for_token(
+    dest_path: Union[str, Path],
+    batch_manifest_id: str,
+    expected_draft_ids: Optional[List[str]] = None,
+) -> bool:
+    """Verifies that the file at dest_path is a valid and complete publication belonging to batch_manifest_id.
+    Validates embedded batch identity and verifies all expected draft IDs are present to guard against truncated writes.
+    The CSV file is the primary publication authority; a stale companion manifest does not invalidate
+    a CSV that legitimately contains the complete batch.
     """
     if not dest_path or not batch_manifest_id:
         return False
@@ -29,31 +35,32 @@ def _is_proven_published_for_token(dest_path: Union[str, Path], batch_manifest_i
     if not p.is_file() or p.stat().st_size == 0:
         return False
 
-    # Check companion manifest if present: if it belongs to another token, fail
-    manifest_p = p.with_suffix(".manifest.json")
-    if manifest_p.is_file() and manifest_p.stat().st_size > 0:
-        try:
-            with open(manifest_p, "r", encoding="utf-8") as mf:
-                m_data = json.load(mf)
-                if isinstance(m_data, dict):
-                    m_tok = m_data.get("batch_manifest_id")
-                    if m_tok and m_tok != batch_manifest_id:
-                        return False
-        except Exception:
-            return False
-
-    # Verify CSV content contains matching batch_manifest_id column and records
+    # Verify CSV content contains matching batch_manifest_id and all expected draft IDs
     try:
         with open(p, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             if not reader.fieldnames or "batch_manifest_id" not in reader.fieldnames:
                 return False
-            row_count = 0
+            if "draft_id" not in reader.fieldnames:
+                return False
+
+            found_draft_ids = set()
             for row in reader:
-                row_count += 1
                 if row.get("batch_manifest_id") != batch_manifest_id:
                     return False
-            return row_count > 0
+                did = row.get("draft_id")
+                if did:
+                    found_draft_ids.add(did)
+
+            if not found_draft_ids:
+                return False
+
+            if expected_draft_ids is not None:
+                expected_set = set(expected_draft_ids)
+                if found_draft_ids != expected_set:
+                    return False
+
+            return True
     except Exception:
         return False
 
@@ -506,7 +513,7 @@ class ApprovalLedger:
             # 1. Reconcile expired reservations before taking new ones
             cursor = conn.execute(
                 """
-                SELECT draft_id, reservation_token, reservation_destination
+                SELECT DISTINCT reservation_token, reservation_destination
                 FROM drafts
                 WHERE reservation_token IS NOT NULL
                   AND reservation_expires_at < ?
@@ -514,41 +521,57 @@ class ApprovalLedger:
                 """,
                 (now_iso, ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
             )
-            expired_rows = cursor.fetchall()
-            for row in expired_rows:
-                r_dest = row["reservation_destination"]
-                r_token = row["reservation_token"]
-                d_id = row["draft_id"]
-                # If destination file was proven published for this token before expiration, finalize it!
-                if r_dest and _is_proven_published_for_token(r_dest, r_token):
-                    conn.execute(
-                        """
-                        UPDATE drafts
-                        SET approval_status = ?, is_dispatched = 0,
-                            reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
-                        WHERE draft_id = ? AND reservation_token = ?
-                        """,
-                        (ApprovalStatus.EXPORTED.value, d_id, r_token),
-                    )
-                    self._log_audit_event(
-                        conn=conn,
-                        draft_id=d_id,
-                        action="EXPORTED",
-                        actor="System/LeaseReconciliation",
-                        previous_status=ApprovalStatus.APPROVED.value,
-                        new_status="EXPORTED",
-                        details={"reconciled_destination": r_dest, "batch_manifest_id": r_token},
-                    )
-                else:
-                    # Not published: safe to release back to queue
+            expired_tokens = cursor.fetchall()
+            for exp in expired_tokens:
+                r_token = exp["reservation_token"]
+                r_dest = exp["reservation_destination"]
+                t_cursor = conn.execute(
+                    """
+                    SELECT draft_id, approval_status FROM drafts
+                    WHERE reservation_token = ?
+                      AND approval_status IN (?, ?)
+                    """,
+                    (r_token, ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
+                )
+                t_rows = t_cursor.fetchall()
+                batch_ids = [tr["draft_id"] for tr in t_rows]
+
+                # If destination file was proven published for this token and all drafts, finalize it!
+                if r_dest and _is_proven_published_for_token(r_dest, r_token, expected_draft_ids=batch_ids):
+                    for tr in t_rows:
+                        d_id = tr["draft_id"]
+                        actual_prev = tr["approval_status"]
+                        conn.execute(
+                            """
+                            UPDATE drafts
+                            SET approval_status = ?, is_dispatched = 0,
+                                reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
+                            WHERE draft_id = ? AND reservation_token = ?
+                            """,
+                            (ApprovalStatus.EXPORTED.value, d_id, r_token),
+                        )
+                        self._log_audit_event(
+                            conn=conn,
+                            draft_id=d_id,
+                            action="EXPORTED",
+                            actor="System/LeaseReconciliation",
+                            previous_status=actual_prev,
+                            new_status="EXPORTED",
+                            details={"reconciled_destination": r_dest, "batch_manifest_id": r_token},
+                        )
+                elif not r_dest or not os.path.exists(r_dest):
+                    # File was not created: safe to release back to queue
                     conn.execute(
                         """
                         UPDATE drafts
                         SET reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
-                        WHERE draft_id = ? AND reservation_token = ?
+                        WHERE reservation_token = ?
                         """,
-                        (d_id, r_token),
+                        (r_token,),
                     )
+                else:
+                    # Destination file exists but is partial/ambiguous: preserve reservation for administrator intervention
+                    pass
 
             # 2. Select eligible drafts for reservation
             cursor = conn.execute(
@@ -598,30 +621,36 @@ class ApprovalLedger:
             if not rows:
                 return 0
 
-            # Check if any row's destination was proven published on disk for this token
+            draft_ids = [r["draft_id"] for r in rows]
             sample_dest = rows[0]["reservation_destination"]
-            if sample_dest and _is_proven_published_for_token(sample_dest, batch_manifest_id):
+
+            # Check if destination was proven published on disk for this exact token and draft list
+            if sample_dest and _is_proven_published_for_token(sample_dest, batch_manifest_id, expected_draft_ids=draft_ids):
                 # File was published! Do NOT release back to queue! Finalize as EXPORTED!
-                draft_ids = [r["draft_id"] for r in rows]
                 conn.close()
                 return self.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
 
-            # Not published: safe to release
-            cursor = conn.execute(
-                """
-                UPDATE drafts
-                SET reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
-                WHERE reservation_token = ?
-                """,
-                (batch_manifest_id,),
-            )
-            count = cursor.rowcount
-            conn.commit()
-            return count
+            # Destination does not exist: safe to release back to queue
+            if not sample_dest or not os.path.exists(sample_dest):
+                cursor = conn.execute(
+                    """
+                    UPDATE drafts
+                    SET reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
+                    WHERE reservation_token = ?
+                    """,
+                    (batch_manifest_id,),
+                )
+                count = cursor.rowcount
+                conn.commit()
+                return count
+
+            # Destination file exists but is partial or ambiguous: preserve for administrator intervention
+            return 0
 
     def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> int:
         """Atomically transitions reserved drafts to EXPORTED and clears reservation tokens.
         Enforces strict token ownership: cannot finalize unreserved drafts or another worker's reservation.
+        Accurately captures prior approval status (APPROVED vs EDITED_AND_APPROVED) in the audit log.
         """
         if not draft_ids or not batch_manifest_id:
             return 0
@@ -631,7 +660,28 @@ class ApprovalLedger:
 
         with self._get_connection() as conn:
             for draft_id in draft_ids:
-                # Atomic update requiring matching active reservation_token in the WHERE clause
+                # Capture actual prior status bound to the active reservation token
+                cursor = conn.execute(
+                    """
+                    SELECT approval_status FROM drafts
+                    WHERE draft_id = ?
+                      AND reservation_token = ?
+                      AND approval_status IN (?, ?)
+                    """,
+                    (
+                        draft_id,
+                        batch_manifest_id,
+                        ApprovalStatus.APPROVED.value,
+                        ApprovalStatus.EDITED_AND_APPROVED.value,
+                    ),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    continue
+
+                actual_prior_status = row["approval_status"]
+
+                # Atomic transition requiring exact draft_id, token, and prior status
                 cursor = conn.execute(
                     """
                     UPDATE drafts
@@ -639,14 +689,13 @@ class ApprovalLedger:
                         reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
                     WHERE draft_id = ?
                       AND reservation_token = ?
-                      AND approval_status IN (?, ?)
+                      AND approval_status = ?
                     """,
                     (
                         ApprovalStatus.EXPORTED.value,
                         draft_id,
                         batch_manifest_id,
-                        ApprovalStatus.APPROVED.value,
-                        ApprovalStatus.EDITED_AND_APPROVED.value,
+                        actual_prior_status,
                     ),
                 )
                 if cursor.rowcount > 0:
@@ -655,7 +704,7 @@ class ApprovalLedger:
                         draft_id=draft_id,
                         action="EXPORTED",
                         actor="System/DispatchExporter",
-                        previous_status=ApprovalStatus.APPROVED.value,
+                        previous_status=actual_prior_status,
                         new_status="EXPORTED",
                         details={"batch_manifest_id": batch_manifest_id},
                     )
@@ -710,29 +759,28 @@ class ApprovalLedger:
             expires_at = token_rows[0]["reservation_expires_at"]
             draft_ids = [r["draft_id"] for r in token_rows]
 
-            # Case A: Export CSV was proven published on disk for this token!
-            if dest_p.exists() and _is_proven_published_for_token(dest_p, token):
-                # Reconcile publication: mark exported and ensure manifest exists
+            # Case A: Export CSV was proven published on disk for this token and complete draft batch!
+            if dest_p.is_file() and _is_proven_published_for_token(dest_p, token, expected_draft_ids=draft_ids):
+                # Reconcile publication: mark exported and ensure manifest matches published CSV
                 manifest_p = dest_p.with_suffix(".manifest.json")
-                if not manifest_p.exists():
-                    manifest_data = {
-                        "batch_manifest_id": token,
-                        "export_file": dest_p.name,
-                        "record_count": len(draft_ids),
-                        "draft_ids": draft_ids,
-                        "exported_at": now_iso,
-                        "reconciled_by": "System/CrashRecovery",
-                    }
-                    try:
-                        with open(manifest_p, "w", encoding="utf-8") as mf:
-                            json.dump(manifest_data, mf, indent=2, ensure_ascii=False)
-                    except Exception:
-                        pass
+                manifest_data = {
+                    "batch_manifest_id": token,
+                    "export_file": dest_p.name,
+                    "record_count": len(draft_ids),
+                    "draft_ids": draft_ids,
+                    "exported_at": now_iso,
+                    "reconciled_by": "System/CrashRecovery",
+                }
+                try:
+                    with open(manifest_p, "w", encoding="utf-8") as mf:
+                        json.dump(manifest_data, mf, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
                 self.mark_exported(draft_ids=draft_ids, batch_manifest_id=token)
                 recovered.append(token)
 
             # Case B: Export CSV does NOT exist on disk:
-            else:
+            elif not dest_p.exists():
                 # Only release if lease is expired! If lease is still live, another worker is actively writing!
                 if expires_at and expires_at < now_iso:
                     self.release_reservation(token)
@@ -740,6 +788,11 @@ class ApprovalLedger:
                 else:
                     # Still live active lease: do not disrupt!
                     pass
+
+            # Case C: Destination file exists on disk but is partial or ambiguous (e.g. truncated write):
+            else:
+                # Preserve reservation for administrator intervention; do NOT finalize and do NOT release!
+                pass
 
         return {"recovered": recovered, "released": released}
 
@@ -779,6 +832,33 @@ class ApprovalLedger:
                 new_status="DISPATCHED",
             )
             conn.commit()
+
+    def get_audit_history(self, draft_id: str) -> List[Dict[str, Any]]:
+        """Returns the chronological audit log entries for a draft."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT log_id, draft_id, action, actor, timestamp, previous_status, new_status, details_json
+                FROM audit_log
+                WHERE draft_id = ?
+                ORDER BY timestamp ASC, log_id ASC
+                """,
+                (draft_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "log_id": r["log_id"],
+                    "draft_id": r["draft_id"],
+                    "action": r["action"],
+                    "actor": r["actor"],
+                    "timestamp": r["timestamp"],
+                    "previous_status": r["previous_status"],
+                    "new_status": r["new_status"],
+                    "details": json.loads(r["details_json"]) if r["details_json"] else {},
+                }
+                for r in rows
+            ]
 
     @staticmethod
     def _row_to_draft(row: sqlite3.Row) -> DraftMessage:
