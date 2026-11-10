@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 import csv
+import json
 import os
 import tempfile
 import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
+from datetime import datetime, timezone
 from .models import (
     LeadInquiry,
     DraftMessage,
@@ -29,7 +31,7 @@ class BatchWorkflowEngine:
 
     @staticmethod
     def parse_leads_csv(filepath: Union[str, Path]) -> List[LeadInquiry]:
-        """Parses and strictly validates customer inquiry leads from CSV."""
+        """Parses and strictly validates customer inquiry leads from CSV, extracting documented consent evidence."""
         path = Path(filepath)
         if not path.is_file():
             raise FileNotFoundError(f"Leads CSV file not found: {path}")
@@ -57,6 +59,7 @@ class BatchWorkflowEngine:
                     raise ValueError(f"Lead '{lead_id}' has unsupported contact channel: '{channel}'.")
 
                 consent_raw = row.get("consent_to_contact", False)
+                consent_evidence = row.get("consent_evidence") or row.get("evidence")
 
                 lead = LeadInquiry(
                     lead_id=lead_id,
@@ -67,6 +70,7 @@ class BatchWorkflowEngine:
                     preferred_language=row.get("preferred_language", "ar"),
                     inquiry_text=row.get("inquiry_text", ""),
                     requested_sku=row.get("requested_sku") or None,
+                    consent_evidence=consent_evidence,
                 )
                 leads.append(lead)
         return leads
@@ -76,7 +80,7 @@ class BatchWorkflowEngine:
         catalog_path: Union[str, Path],
         leads_path: Union[str, Path],
     ) -> Dict[str, Any]:
-        """Executes full offline batch pipeline: Ingestion -> Generation -> Verification -> Ledger Storage."""
+        """Executes full offline batch pipeline with deterministic, idempotent draft IDs."""
         cat_p = Path(catalog_path)
         if cat_p.suffix.lower() == ".json":
             catalog = CatalogLoader.load_json(cat_p)
@@ -94,10 +98,12 @@ class BatchWorkflowEngine:
             "draft_ids": [],
         }
 
-        generated_drafts: List[DraftMessage] = []
         for lead in leads:
             draft = self.generator.generate_draft(lead=lead, catalog=catalog)
-            generated_drafts.append(draft)
+            # Guarantee idempotent draft IDs per lead to prevent duplicate accumulation on batch retries
+            draft.draft_id = f"DRAFT-{lead.lead_id}"
+
+            self.ledger.save_draft(draft)
             results["draft_ids"].append(draft.draft_id)
             results["drafts_queued"] += 1
 
@@ -109,10 +115,6 @@ class BatchWorkflowEngine:
             else:
                 results["uncertain_verification"] += 1
 
-        # Persist all drafts to SQLite ledger
-        for draft in generated_drafts:
-            self.ledger.save_draft(draft)
-
         return results
 
     def export_approved_to_csv(
@@ -120,7 +122,7 @@ class BatchWorkflowEngine:
         output_csv_path: Union[str, Path],
         mark_as_exported: bool = True,
     ) -> int:
-        """Atomically exports verified approved drafts to a dispatch CSV for CRM or email delivery queues.
+        """Atomically exports verified approved drafts with a durable manifest.
         Guarantees that a write failure never leaves a corrupt or truncated file.
         """
         approved_drafts = self.ledger.get_approved_for_dispatch()
@@ -148,8 +150,9 @@ class BatchWorkflowEngine:
         ]
 
         batch_manifest_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"
+        draft_ids = [d.draft_id for d in approved_drafts]
 
-        # Write to temporary file in same directory first to ensure atomic rename
+        # Write CSV to temporary file in same directory first to ensure atomic rename
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", newline="", dir=out_p.parent, delete=False
         ) as tmp_file:
@@ -174,8 +177,19 @@ class BatchWorkflowEngine:
                     "consent_evidence": draft.consent_evidence,
                 })
 
+        # Write durable manifest JSON alongside the export
+        manifest_path = out_p.with_suffix(".manifest.json")
+        manifest_data = {
+            "batch_manifest_id": batch_manifest_id,
+            "export_file": out_p.name,
+            "record_count": len(draft_ids),
+            "draft_ids": draft_ids,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(manifest_path, "w", encoding="utf-8") as mf:
+            json.dump(manifest_data, mf, indent=2, ensure_ascii=False)
+
         try:
-            # Atomic publish via file rename
             os.replace(tmp_path, out_p)
         except Exception:
             if os.path.exists(tmp_path):
@@ -183,7 +197,6 @@ class BatchWorkflowEngine:
             raise
 
         if mark_as_exported:
-            draft_ids = [d.draft_id for d in approved_drafts]
             self.ledger.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
 
         return len(approved_drafts)

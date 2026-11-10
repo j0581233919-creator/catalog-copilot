@@ -111,7 +111,7 @@ class DraftGenerator:
                 f"مرحباً {name}،\n\n"
                 f"نشكركم على اهتمامكم بمنتج {item.title_ar} (رمز المنتج: {item.sku}).\n"
                 f"نود إفادتكم بأن هذا المنتج غير متوفر حالياً في مستودعاتنا.\n"
-                f"يرجى إعلامنا إذا كنتم ترغبون في المساعدة باختيار منتج بديل متاح.\n\n"
+                f"يرجى إعلامنا إذا كنتم ترغبون في المساعدة باختيار منتج بديل آخر.\n\n"
                 f"مع خالص الشكر والتقدير،\nفريق المبيعات"
             )
             return subject, body
@@ -154,7 +154,7 @@ class DraftGenerator:
                 f"Dear {name},\n\n"
                 f"Thank you for your interest in {item.title_en} (SKU: {item.sku}).\n"
                 f"Currently, this item is out of stock in our inventory.\n"
-                f"Please let us know if we can assist you with an alternative available product.\n\n"
+                f"Please let us know if we can assist you with an alternative product.\n\n"
                 f"Best regards,\nSales Support Team"
             )
             return subject, body

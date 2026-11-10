@@ -31,7 +31,7 @@ class ApprovalLedger:
         return conn
 
     def _init_db(self) -> None:
-        """Initializes tables for drafts and immutable audit logging."""
+        """Initializes tables, migrations, and immutability triggers for audit logging."""
         with self._get_connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS drafts (
@@ -44,7 +44,7 @@ class ApprovalLedger:
                     language TEXT NOT NULL,
                     subject TEXT NOT NULL,
                     body TEXT NOT NULL,
-                    consent_to_contact INTEGER NOT NULL,
+                    consent_to_contact INTEGER NOT NULL DEFAULT 0,
                     consent_evidence TEXT,
                     verification_status TEXT NOT NULL,
                     verification_report_json TEXT NOT NULL,
@@ -57,6 +57,15 @@ class ApprovalLedger:
                     created_at TEXT NOT NULL
                 )
             """)
+
+            # Schema migration check: ensure legacy databases acquire consent columns safely
+            cursor = conn.execute("PRAGMA table_info(drafts)")
+            existing_columns = {row["name"] for row in cursor.fetchall()}
+            if "consent_to_contact" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN consent_to_contact INTEGER NOT NULL DEFAULT 0")
+            if "consent_evidence" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN consent_evidence TEXT")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS audit_log (
                     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +77,22 @@ class ApprovalLedger:
                     details_json TEXT,
                     timestamp TEXT NOT NULL
                 )
+            """)
+
+            # Immutability triggers for audit_log: prohibit application-level UPDATE or DELETE
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trig_audit_log_immutable_update
+                BEFORE UPDATE ON audit_log
+                BEGIN
+                    SELECT RAISE(ABORT, 'Security Invariant: audit_log records are immutable and cannot be updated.');
+                END;
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trig_audit_log_immutable_delete
+                BEFORE DELETE ON audit_log
+                BEGIN
+                    SELECT RAISE(ABORT, 'Security Invariant: audit_log records are immutable and cannot be deleted.');
+                END;
             """)
             conn.commit()
 
@@ -100,21 +125,21 @@ class ApprovalLedger:
         )
 
     def save_draft(self, draft: DraftMessage) -> None:
-        """Stores a new draft. Prevents silently replacing approved or dispatched records."""
+        """Stores a draft. Invariant: ALL drafts strictly enter in PENDING_REVIEW state.
+        No caller can insert a pre-approved or pre-dispatched draft directly.
+        """
         with self._get_connection() as conn:
             cursor = conn.execute("SELECT approval_status FROM drafts WHERE draft_id = ?", (draft.draft_id,))
             row = cursor.fetchone()
             if row:
                 existing_status = row["approval_status"]
-                if existing_status in (
-                    ApprovalStatus.APPROVED.value,
-                    ApprovalStatus.EDITED_AND_APPROVED.value,
-                    ApprovalStatus.EXPORTED.value,
-                    ApprovalStatus.DISPATCHED.value,
-                ):
+                if existing_status != ApprovalStatus.PENDING_REVIEW.value:
                     raise ValueError(
                         f"Cannot overwrite draft '{draft.draft_id}': already finalized in status '{existing_status}'."
                     )
+
+            # Strict invariant: newly saved drafts ALWAYS start in PENDING_REVIEW
+            enforced_status = ApprovalStatus.PENDING_REVIEW.value
 
             conn.execute(
                 """
@@ -122,8 +147,8 @@ class ApprovalLedger:
                     draft_id, lead_id, customer_name, contact_channel, contact_target,
                     sku, language, subject, body, consent_to_contact, consent_evidence,
                     verification_status, verification_report_json, approval_status,
-                    reviewer_notes, reviewed_by, reviewed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reviewer_notes, reviewed_by, reviewed_at, is_dispatched, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.draft_id,
@@ -139,10 +164,11 @@ class ApprovalLedger:
                     draft.consent_evidence,
                     draft.verification_report.status.value,
                     json.dumps(draft.verification_report.to_dict(), ensure_ascii=False),
-                    draft.approval_status.value,
-                    draft.reviewer_notes,
-                    draft.reviewed_by,
-                    draft.reviewed_at,
+                    enforced_status,
+                    None,
+                    None,
+                    None,
+                    0,
                     draft.created_at,
                 ),
             )
@@ -152,10 +178,11 @@ class ApprovalLedger:
                 action="DRAFT_CREATED",
                 actor="System/DraftGenerator",
                 previous_status=None,
-                new_status=draft.approval_status.value,
+                new_status=enforced_status,
                 details={
                     "verification_status": draft.verification_report.status.value,
                     "consent_to_contact": draft.consent_to_contact,
+                    "consent_evidence": draft.consent_evidence,
                     "reasons": draft.verification_report.reasons,
                 },
             )
@@ -256,9 +283,9 @@ class ApprovalLedger:
 
             draft = self._row_to_draft(row)
 
-            if draft.approval_status not in (ApprovalStatus.PENDING_REVIEW,):
+            if draft.approval_status != ApprovalStatus.PENDING_REVIEW:
                 raise ValueError(
-                    f"Cannot reject draft '{draft_id}': current status is '{draft.approval_status.value}'."
+                    f"Cannot reject draft '{draft_id}': current status is '{draft.approval_status.value}', must be '{ApprovalStatus.PENDING_REVIEW.value}'."
                 )
 
             prev_status = draft.approval_status.value
@@ -316,13 +343,11 @@ class ApprovalLedger:
 
             draft = self._row_to_draft(row)
 
-            # Predecessor state check
             if draft.approval_status != ApprovalStatus.PENDING_REVIEW:
                 raise ValueError(
                     f"Cannot edit and approve draft '{draft_id}': status is '{draft.approval_status.value}', must be '{ApprovalStatus.PENDING_REVIEW.value}'."
                 )
 
-            # Strict consent preservation: If lead had no consent, editing CANNOT bypass it!
             if not draft.consent_to_contact:
                 raise ValueError(
                     f"Cannot edit and approve draft '{draft_id}': Customer has not granted opt-in contact consent. Outreach strictly prohibited."
@@ -341,7 +366,6 @@ class ApprovalLedger:
                 consent_evidence=draft.consent_evidence,
             )
 
-            # Deterministically re-verify edited body
             new_report = self.verifier.verify(
                 lead=lead,
                 catalog=catalog,
@@ -416,39 +440,68 @@ class ApprovalLedger:
             )
             return [self._row_to_draft(row) for row in cursor.fetchall()]
 
-    def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> None:
-        """Atomically transitions approved drafts to EXPORTED in a single transaction."""
+    def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> int:
+        """Atomically transitions approved drafts to EXPORTED in a single transaction.
+        Returns the exact number of rows successfully updated.
+        """
+        if not draft_ids:
+            return 0
+
         now = datetime.now(timezone.utc).isoformat()
+        updated_count = 0
+
         with self._get_connection() as conn:
             for draft_id in draft_ids:
+                cursor = conn.execute("SELECT approval_status FROM drafts WHERE draft_id = ?", (draft_id,))
+                row = cursor.fetchone()
+                if not row:
+                    continue
+
+                prev_status = row["approval_status"]
+                if prev_status not in (ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value):
+                    continue
+
                 conn.execute(
                     """
                     UPDATE drafts
                     SET approval_status = ?, is_dispatched = 0
-                    WHERE draft_id = ? AND approval_status IN (?, ?)
+                    WHERE draft_id = ?
                     """,
-                    (
-                        ApprovalStatus.EXPORTED.value,
-                        draft_id,
-                        ApprovalStatus.APPROVED.value,
-                        ApprovalStatus.EDITED_AND_APPROVED.value,
-                    ),
+                    (ApprovalStatus.EXPORTED.value, draft_id),
                 )
                 self._log_audit_event(
                     conn=conn,
                     draft_id=draft_id,
                     action="EXPORTED",
                     actor="System/DispatchExporter",
-                    previous_status="APPROVED",
+                    previous_status=prev_status,
                     new_status="EXPORTED",
                     details={"batch_manifest_id": batch_manifest_id},
                 )
+                updated_count += 1
             conn.commit()
+
+        return updated_count
 
     def mark_dispatched(self, draft_id: str) -> None:
         """Marks an exported or approved draft as dispatched upon delivery confirmation."""
-        now = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
+            cursor = conn.execute("SELECT approval_status FROM drafts WHERE draft_id = ?", (draft_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise KeyError(f"Draft '{draft_id}' not found for dispatch confirmation.")
+
+            prev_status = row["approval_status"]
+            if prev_status not in (
+                ApprovalStatus.EXPORTED.value,
+                ApprovalStatus.APPROVED.value,
+                ApprovalStatus.EDITED_AND_APPROVED.value,
+            ):
+                raise ValueError(
+                    f"Cannot mark draft '{draft_id}' as dispatched: invalid predecessor status '{prev_status}'."
+                )
+
+            now = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 """
                 UPDATE drafts
@@ -462,7 +515,7 @@ class ApprovalLedger:
                 draft_id=draft_id,
                 action="DISPATCHED",
                 actor="System/DeliveryWorker",
-                previous_status="EXPORTED",
+                previous_status=prev_status,
                 new_status="DISPATCHED",
             )
             conn.commit()

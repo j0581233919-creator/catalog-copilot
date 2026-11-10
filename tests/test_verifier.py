@@ -77,7 +77,6 @@ class TestCommercialClaimVerifier(unittest.TestCase):
         self.assertIn("Price mismatch", report.reasons[0])
 
     def test_mixed_prices_catches_all_numbers(self):
-        """CRITICAL REGRESSION: A valid price followed by a false price (e.g. costs 100 SAR; price is 5) must FAIL."""
         draft_text = "Hello Ali, SKU-COFFEE-01 costs 100 SAR; price is 5."
         report = self.verifier.verify(
             lead=self.authorized_lead,
@@ -88,9 +87,9 @@ class TestCommercialClaimVerifier(unittest.TestCase):
         self.assertEqual(report.status, VerificationStatus.FAIL)
         self.assertTrue(any("Price mismatch" in r for r in report.reasons))
 
-    def test_unrecognized_commercial_claims_fail_closed(self):
-        """CRITICAL REGRESSION: Claims about warranty or free shipping not in catalog must return UNCERTAIN."""
-        draft_text = "Hello Ali, SKU-COFFEE-01 is in stock at 100.00 SAR with a lifetime warranty and free shipping."
+    def test_unrecognized_warranty_claim_fail_closed(self):
+        """CRITICAL CODEX CHECK: Arbitrary warranty claim like 'two year warranty' must return UNCERTAIN."""
+        draft_text = "Hello Ali, SKU-COFFEE-01 includes a two year warranty."
         report = self.verifier.verify(
             lead=self.authorized_lead,
             catalog=self.catalog,
@@ -101,6 +100,56 @@ class TestCommercialClaimVerifier(unittest.TestCase):
         self.assertTrue(report.requires_human_intervention)
         ungrounded = [c for c in report.checks if c.claim_type == ClaimType.UNGROUNDED_CLAIM]
         self.assertTrue(len(ungrounded) > 0)
+
+    def test_contradictory_stock_statements_fail_closed(self):
+        """CRITICAL CODEX CHECK: 'out of stock but available' contains contradictory stock statements -> UNCERTAIN."""
+        draft_text = "Hello, SKU-COFFEE-02 is out of stock but available."
+        report = self.verifier.verify(
+            lead=self.authorized_lead,
+            catalog=self.catalog,
+            draft_text=draft_text,
+            target_sku="SKU-COFFEE-02",
+        )
+        self.assertEqual(report.status, VerificationStatus.UNCERTAIN)
+        self.assertTrue(report.requires_human_intervention)
+
+    def test_currency_euros_mapped_and_fails_mismatch(self):
+        """CRITICAL CODEX CHECK: '5 euros' must be recognized as EUR and fail currency check against SAR."""
+        draft_text = "Hello, SKU-COFFEE-01 costs 5 euros."
+        report = self.verifier.verify(
+            lead=self.authorized_lead,
+            catalog=self.catalog,
+            draft_text=draft_text,
+            target_sku="SKU-COFFEE-01",
+        )
+        self.assertEqual(report.status, VerificationStatus.FAIL)
+        curr_checks = [c for c in report.checks if c.claim_type == ClaimType.CURRENCY]
+        self.assertTrue(any(not c.is_valid for c in curr_checks))
+
+    def test_expired_promotion_fails(self):
+        """HIGH REGRESSION: Expired promotion date in catalog must be flagged as FAIL."""
+        item_expired = CatalogItem(
+            sku="SKU-EXP-01",
+            title_en="Expired Item",
+            title_ar="منتج منتهي العرض",
+            price=100.0,
+            currency="SAR",
+            stock_quantity=10,
+            is_active=True,
+            discount_percent=20.0,
+            discount_price=80.0,
+            offer_valid_until="2020-01-01T00:00:00Z",  # In the past!
+        )
+        self.catalog.add_item(item_expired)
+        draft_text = "Hello, SKU-EXP-01 is available with a 20% discount."
+        report = self.verifier.verify(
+            lead=self.authorized_lead,
+            catalog=self.catalog,
+            draft_text=draft_text,
+            target_sku="SKU-EXP-01",
+        )
+        self.assertEqual(report.status, VerificationStatus.FAIL)
+        self.assertTrue(any("Expired promotion" in r for r in report.reasons))
 
     def test_stock_mismatch_fails_when_promising_out_of_stock(self):
         lead = LeadInquiry(
@@ -126,7 +175,6 @@ class TestCommercialClaimVerifier(unittest.TestCase):
         self.assertTrue(any("Stock mismatch" in r for r in report.reasons))
 
     def test_stock_negation_handling(self):
-        """HIGH REGRESSION: 'not out of stock' asserts availability. If 0 stock, must FAIL."""
         lead = LeadInquiry(
             lead_id="L-NEG",
             customer_name="Negation Tester",
@@ -137,7 +185,6 @@ class TestCommercialClaimVerifier(unittest.TestCase):
             inquiry_text="Robusta stock?",
             requested_sku="SKU-COFFEE-02",
         )
-        # Robusta has 0 stock. Saying 'not out of stock' asserts it is available -> must FAIL!
         draft_text = "Hello, SKU-COFFEE-02 is not out of stock at 80 SAR."
         report = self.verifier.verify(
             lead=lead,
@@ -149,7 +196,6 @@ class TestCommercialClaimVerifier(unittest.TestCase):
         self.assertTrue(any("Stock mismatch" in r for r in report.reasons))
 
     def test_conflicting_sku_in_text(self):
-        """HIGH REGRESSION: Mentioning another product's SKU in the text must FAIL."""
         draft_text = "Hello Ali, SKU-COFFEE-01 is in stock at 100 SAR, also see SKU-COFFEE-02."
         report = self.verifier.verify(
             lead=self.authorized_lead,
@@ -178,7 +224,7 @@ class TestCommercialClaimVerifier(unittest.TestCase):
             customer_name="Unauthorized Lead",
             contact_channel="phone",
             contact_target="+966555555555",
-            consent_to_contact=False,  # NO CONSENT
+            consent_to_contact=False,
             preferred_language="en",
             inquiry_text="Inquiry",
             requested_sku="SKU-COFFEE-01",

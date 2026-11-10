@@ -3,6 +3,7 @@
 from __future__ import annotations
 import re
 from typing import List, Optional, Tuple, Set, Dict, Any
+from datetime import datetime, timezone
 from .models import (
     CatalogItem,
     LeadInquiry,
@@ -22,16 +23,16 @@ class CommercialClaimVerifier:
     1. Mandatory Customer Consent (Never send unsolicited outreach).
     2. SKU existence and text binding against authorized catalog.
     3. Stated price accuracy across ALL price assertions in the message.
-    4. Stock availability with negation and ambiguity parsing.
-    5. Active promotional discount eligibility.
+    4. Stock availability with contradictory statement and negation parsing.
+    5. Active promotional discount eligibility and expiry.
     6. Currency alignment.
     7. Fail-closed detection of ungrounded commercial assertions (warranties, free shipping, gifts).
     """
 
     # Price extraction regex patterns
     _PRICE_WITH_CURRENCY = [
-        re.compile(r"(\d+(?:\.\d+)?)\s*(SAR|USD|EGP|AED|EUR|ريال|ر\.س|جنيه|درهم|دولار|\$)", re.IGNORECASE),
-        re.compile(r"(SAR|USD|EGP|AED|EUR|\$)\s*(\d+(?:\.\d+)?)", re.IGNORECASE),
+        re.compile(r"(\d+(?:\.\d+)?)\s*(SAR|USD|EGP|AED|EUR|GBP|ريال|ر\.س|جنيه|درهم|دولار|يورو|باوند|euros?|pounds?|\$|€|£)", re.IGNORECASE),
+        re.compile(r"(SAR|USD|EGP|AED|EUR|GBP|\$|€|£)\s*(\d+(?:\.\d+)?)", re.IGNORECASE),
     ]
 
     _PRICE_WITHOUT_CURRENCY = [
@@ -46,10 +47,10 @@ class CommercialClaimVerifier:
         re.compile(r"(?:خصم|تخفيض)\s*(\d+(?:\.\d+)?)\s*%", re.IGNORECASE),
     ]
 
-    # Ungrounded commercial claim keywords (must fail-closed if found without catalog support)
+    # Broad ungrounded commercial claim keywords (must fail-closed if found without catalog support)
     _UNGROUNDED_PATTERNS = [
-        re.compile(r"\b(lifetime warranty|full warranty|money[- ]back|guaranteed refund|free shipping|free delivery|free gift|price match|lowest price)\b", re.IGNORECASE),
-        re.compile(r"(ضمان مدى الحياة|ضمان شامل|كفالة|استرجاع مجاني|استرداد المبلغ|شحن مجاني|توصيل مجاني|هدية مجانية|أقل سعر|أفضل سعر)", re.IGNORECASE),
+        re.compile(r"\b(\w+\s+)?(warranty|guarantee|guaranteed|refund|return policy|free shipping|free delivery|free gift|gift|price match|lowest price|cashback)\b", re.IGNORECASE),
+        re.compile(r"(ضمان|كفالة|استرجاع|استرداد|شحن مجاني|توصيل مجاني|هدية|أقل سعر|أفضل سعر|كاش باك)", re.IGNORECASE),
     ]
 
     # Normalized currency mapping
@@ -58,7 +59,8 @@ class CommercialClaimVerifier:
         "USD": "USD", "دولار": "USD", "$": "USD",
         "EGP": "EGP", "جنيه": "EGP", "ج.م": "EGP",
         "AED": "AED", "درهم": "AED", "د.إ": "AED",
-        "EUR": "EUR", "يورو": "EUR", "€": "EUR",
+        "EUR": "EUR", "EUROS": "EUR", "EURO": "EUR", "يورو": "EUR", "€": "EUR",
+        "GBP": "GBP", "POUNDS": "GBP", "POUND": "GBP", "باوند": "GBP", "£": "GBP",
     }
 
     @classmethod
@@ -73,12 +75,14 @@ class CommercialClaimVerifier:
                 g1, g2 = match.groups()
                 try:
                     val = float(g1)
-                    curr = cls._CURRENCY_NORM.get(g2.upper(), cls._CURRENCY_NORM.get(g2, g2.upper()))
+                    curr_raw = g2.upper()
+                    curr = cls._CURRENCY_NORM.get(curr_raw, cls._CURRENCY_NORM.get(g2, curr_raw))
                     extracted.append((val, curr))
                 except ValueError:
                     try:
                         val = float(g2)
-                        curr = cls._CURRENCY_NORM.get(g1.upper(), cls._CURRENCY_NORM.get(g1, g1.upper()))
+                        curr_raw = g1.upper()
+                        curr = cls._CURRENCY_NORM.get(curr_raw, cls._CURRENCY_NORM.get(g1, curr_raw))
                         extracted.append((val, curr))
                     except ValueError:
                         continue
@@ -88,7 +92,6 @@ class CommercialClaimVerifier:
             for match in pattern.finditer(clean_text):
                 try:
                     val = float(match.group(1))
-                    # Avoid duplicate if already extracted with currency
                     if not any(abs(val - ex_val) < 0.001 for ex_val, _ in extracted):
                         extracted.append((val, None))
                 except (ValueError, IndexError):
@@ -111,44 +114,41 @@ class CommercialClaimVerifier:
 
     @classmethod
     def _detect_stock_claims(cls, text: str) -> Tuple[bool, bool, bool]:
-        """Detects stock assertions considering negation.
-        Returns: (claims_in_stock: bool, claims_out_of_stock: bool, is_ambiguous: bool)
+        """Detects stock assertions considering negation and contradictory statements.
+        Returns: (claims_in_stock: bool, claims_out_of_stock: bool, is_contradictory: bool)
         """
         lower_en = text.lower()
-        norm_ar = normalize_arabic_text(text)
 
-        # Explicit negation patterns
-        # English:
-        # "not out of stock" -> asserts IN STOCK
-        # "not in stock" / "not available" -> asserts OUT OF STOCK
+        # Check explicit English negations
         en_not_out = bool(re.search(r"\b(not|isn't|is not)\s+out\s+of\s+stock\b", lower_en))
         en_not_in = bool(re.search(r"\b(not|isn't|is not|no longer)\s+(in\s+stock|available)\b", lower_en))
 
-        en_plain_out = bool(re.search(r"\b(out\s+of\s+stock|unavailable|sold\s+out)\b", lower_en))
-        en_plain_in = bool(re.search(r"\b(in\s+stock|available|on\s+hand|ready\s+to\s+ship)\b", lower_en))
+        has_out_phrase_en = bool(re.search(r"\b(out\s+of\s+stock|unavailable|sold\s+out)\b", lower_en)) or en_not_in
 
-        # Arabic:
-        # "ليس غير متوفر" -> asserts IN STOCK
-        # "ليس متوفر" / "غير متوفر" / "غير متاح" / "نفذت الكمية" -> asserts OUT OF STOCK
+        # Positive in-stock phrases in English (excluding those consumed by negative phrases)
+        clean_en_for_pos = lower_en
+        for neg_term in ["out of stock", "not in stock", "not available", "no longer available", "unavailable", "sold out"]:
+            clean_en_for_pos = clean_en_for_pos.replace(neg_term, " ")
+        has_in_phrase_en = bool(re.search(r"\b(in\s+stock|available|on\s+hand|ready\s+to\s+ship)\b", clean_en_for_pos)) or en_not_out
+
+        # Arabic phrases
         ar_not_out = "ليس غير متوفر" in text or "ليست غير متوفره" in text
-        ar_out = any(term in text for term in ["غير متوفر", "غير متاح", "نفذت الكمية", "نفد من المخزون", "غير متواجد", "ليس متوفر", "لا يتوفر"])
-        ar_in = any(term in text for term in ["متوفر لدينا", "متوفر حاليا", "متاح للشحن", "جاهز للشحن", "متواجد بالمخزون", "متوفرة"])
+        has_out_phrase_ar = any(term in text for term in ["غير متوفر", "غير متاح", "نفذت الكمية", "نفد من المخزون", "ليس متوفر", "لا يتوفر", "غير متواجد"])
 
-        # Resolve English polarity
-        claims_in_en = en_not_out or (en_plain_in and not en_not_in and not en_plain_out)
-        claims_out_en = en_not_in or (en_plain_out and not en_not_out)
+        clean_ar_for_pos = text
+        for neg_term in ["غير متوفر", "ليس متوفر", "غير متاح", "ليس متاح", "غير متواجد", "لا يتوفر", "نفذت الكمية", "نفد من المخزون"]:
+            clean_ar_for_pos = clean_ar_for_pos.replace(neg_term, " ")
+        has_in_phrase_ar = ar_not_out or any(term in clean_ar_for_pos for term in ["متوفر لدينا", "متوفر حاليا", "متاح للشحن", "جاهز للشحن", "متوفرة", "متوفر", "متاح"])
 
-        # Resolve Arabic polarity
-        claims_in_ar = ar_not_out or (ar_in and not ar_out)
-        claims_out_ar = ar_out and not ar_not_out
+        # Check contradictions (asserting both in-stock and out-of-stock without negation)
+        is_contra_en = has_out_phrase_en and has_in_phrase_en and not en_not_out and not en_not_in
+        is_contra_ar = has_out_phrase_ar and has_in_phrase_ar and not ar_not_out
 
-        claims_in = claims_in_en or claims_in_ar
-        claims_out = claims_out_en or claims_out_ar
-
-        # If both trigger or conflict
-        is_ambiguous = (claims_in and claims_out)
-        if is_ambiguous:
+        if is_contra_en or is_contra_ar:
             return False, False, True
+
+        claims_in = en_not_out or ar_not_out or (has_in_phrase_en and not has_out_phrase_en) or (has_in_phrase_ar and not has_out_phrase_ar)
+        claims_out = en_not_in or (has_out_phrase_en and not en_not_out and not has_in_phrase_en) or (has_out_phrase_ar and not ar_not_out and not has_in_phrase_ar)
 
         return claims_in, claims_out, False
 
@@ -184,30 +184,32 @@ class CommercialClaimVerifier:
                 claimed_value=True,
                 catalog_value=True,
                 is_valid=True,
-                notes="Verified customer opt-in consent exists.",
+                notes=f"Verified customer opt-in consent exists (Evidence: {lead.consent_evidence}).",
             ))
 
         # 2. Check for Ungrounded Claims (warranties, free shipping, gifts, guarantees)
+        sku = (target_sku or lead.requested_sku or "").strip().upper()
+        catalog_item: Optional[CatalogItem] = catalog.get_item(sku) if sku else None
+
         for pattern in self._UNGROUNDED_PATTERNS:
             match = pattern.search(draft_text)
             if match:
-                term = match.group(0)
-                checks.append(ClaimVerification(
-                    claim_type=ClaimType.UNGROUNDED_CLAIM,
-                    claimed_value=term,
-                    catalog_value=None,
-                    is_valid=False,
-                    notes=f"Draft asserts ungrounded commercial term '{term}' not present in merchant catalog specifications.",
-                ))
-                reasons.append(f"Ungrounded claim: '{term}' is not supported by catalog ground truth.")
-                overall_status = VerificationStatus.UNCERTAIN
+                term = match.group(0).strip()
+                # Check if catalog explicitly supports this term in descriptions
+                cat_desc = f"{catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}" if catalog_item else ""
+                if term.lower() not in cat_desc.lower():
+                    checks.append(ClaimVerification(
+                        claim_type=ClaimType.UNGROUNDED_CLAIM,
+                        claimed_value=term,
+                        catalog_value=None,
+                        is_valid=False,
+                        notes=f"Draft asserts ungrounded commercial term '{term}' not supported by merchant catalog.",
+                    ))
+                    reasons.append(f"Ungrounded claim: '{term}' is not supported by catalog ground truth.")
+                    overall_status = VerificationStatus.UNCERTAIN
 
         # 3. SKU Existence and Text Binding Check
-        sku = (target_sku or lead.requested_sku or "").strip().upper()
-        catalog_item: Optional[CatalogItem] = None
-
         if sku:
-            catalog_item = catalog.get_item(sku)
             if catalog_item is None:
                 checks.append(ClaimVerification(
                     claim_type=ClaimType.SKU_EXISTENCE,
@@ -241,9 +243,8 @@ class CommercialClaimVerifier:
                         reasons.append(f"SKU conflict: Text mentions '{found_sku}', but bound item is '{catalog_item.sku}'.")
                         overall_status = VerificationStatus.FAIL
         else:
-            # If no SKU is identified, check if commercial claims are being made
             extracted_prices = self._extract_all_prices_and_currencies(draft_text)
-            claims_in, claims_out, is_ambig = self._detect_stock_claims(draft_text)
+            claims_in, claims_out, is_contra = self._detect_stock_claims(draft_text)
             if extracted_prices or claims_in or claims_out or claimed_price is not None:
                 checks.append(ClaimVerification(
                     claim_type=ClaimType.UNGROUNDED_CLAIM,
@@ -255,7 +256,6 @@ class CommercialClaimVerifier:
                 reasons.append("Ungrounded commercial claims: Price or stock mentioned without a valid SKU.")
                 overall_status = VerificationStatus.UNCERTAIN
             else:
-                # General conversational inquiry without commercial promises
                 checks.append(ClaimVerification(
                     claim_type=ClaimType.SKU_EXISTENCE,
                     claimed_value=None,
@@ -266,21 +266,21 @@ class CommercialClaimVerifier:
 
         # 4. Stock Availability Verification
         if catalog_item is not None:
-            claims_in, claims_out, is_ambig = self._detect_stock_claims(draft_text)
+            claims_in, claims_out, is_contra = self._detect_stock_claims(draft_text)
             if claimed_stock is not None:
                 claims_in = claimed_stock
                 claims_out = not claimed_stock
-                is_ambig = False
+                is_contra = False
 
-            if is_ambig:
+            if is_contra:
                 checks.append(ClaimVerification(
                     claim_type=ClaimType.STOCK_AVAILABILITY,
-                    claimed_value="Ambiguous / conflicting stock statements",
+                    claimed_value="Contradictory stock statements",
                     catalog_value=f"Quantity: {catalog_item.stock_quantity}",
                     is_valid=False,
-                    notes="Draft contains conflicting or ambiguous availability statements (e.g. mixed negations).",
+                    notes="Draft contains contradictory availability statements (e.g. claiming both available and out of stock).",
                 ))
-                reasons.append("Stock ambiguity: Message contains conflicting stock indicators.")
+                reasons.append("Stock ambiguity: Contradictory stock statements in message.")
                 overall_status = VerificationStatus.UNCERTAIN
             elif claims_in:
                 if not catalog_item.in_stock:
@@ -326,7 +326,6 @@ class CommercialClaimVerifier:
 
             for price_val, curr_val in extracted_prices:
                 price_rounded = round(price_val, 2)
-                # Check price match
                 if price_rounded not in allowed_prices:
                     checks.append(ClaimVerification(
                         claim_type=ClaimType.PRICE,
@@ -368,11 +367,29 @@ class CommercialClaimVerifier:
                             notes=f"Currency '{catalog_item.currency}' matches catalog specification.",
                         ))
 
-        # 6. Discount / Promotion Verification
+        # 6. Discount / Promotion Verification & Expiry
         if catalog_item is not None:
             extracted_discounts = self._extract_discounts(draft_text)
             if claimed_discount is not None:
                 extracted_discounts.append(claimed_discount)
+
+            # Check promotion expiry if validity date is set
+            if catalog_item.offer_valid_until:
+                try:
+                    expiry_dt = datetime.fromisoformat(catalog_item.offer_valid_until.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > expiry_dt:
+                        if extracted_discounts or catalog_item.discount_percent > 0:
+                            checks.append(ClaimVerification(
+                                claim_type=ClaimType.DISCOUNT_OFFER,
+                                claimed_value="Active promotion",
+                                catalog_value=f"Expired on {catalog_item.offer_valid_until}",
+                                is_valid=False,
+                                notes="Promotional offer has expired according to catalog offer_valid_until date.",
+                            ))
+                            reasons.append("Expired promotion: Offer date is in the past.")
+                            overall_status = VerificationStatus.FAIL
+                except ValueError:
+                    pass
 
             for discount_val in extracted_discounts:
                 discount_rounded = round(discount_val, 1)
@@ -398,14 +415,23 @@ class CommercialClaimVerifier:
 
         # Fail-closed summary determination:
         # 1. Hard failure (consent violation, wrong price, out-of-stock violation, unauthorized discount, invalid SKU) -> FAIL
-        # 2. Ungrounded / ambiguous commercial claim without hard conflict -> UNCERTAIN (Fail-Closed)
+        # 2. Ungrounded / ambiguous commercial claim / contradictory stock without hard conflict -> UNCERTAIN (Fail-Closed)
         # 3. All checks verified against catalog ground truth and consent confirmed -> PASS
-        has_hard_fail = any(not c.is_valid and c.claim_type != ClaimType.UNGROUNDED_CLAIM for c in checks)
-        has_ungrounded = any(c.claim_type == ClaimType.UNGROUNDED_CLAIM for c in checks) or (overall_status == VerificationStatus.UNCERTAIN)
+        has_hard_fail = any(
+            not c.is_valid
+            and c.claim_type != ClaimType.UNGROUNDED_CLAIM
+            and not (c.claim_type == ClaimType.STOCK_AVAILABILITY and is_contra)
+            for c in checks
+        )
+        has_uncertain = (
+            any(c.claim_type == ClaimType.UNGROUNDED_CLAIM for c in checks)
+            or is_contra
+            or (overall_status == VerificationStatus.UNCERTAIN)
+        )
 
         if has_hard_fail:
             overall_status = VerificationStatus.FAIL
-        elif has_ungrounded:
+        elif has_uncertain:
             overall_status = VerificationStatus.UNCERTAIN
         else:
             overall_status = VerificationStatus.PASS

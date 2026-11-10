@@ -169,14 +169,21 @@ class CatalogLoader:
             if math.isnan(discount_price) or math.isinf(discount_price) or discount_price < 0 or discount_price > price:
                 raise ValueError(f"SKU '{sku}' discount price {discount_price} must be between 0 and standard price {price}.")
 
-        # Check mathematical consistency between discount price and percent
+        # Exact currency-appropriate mathematical consistency check
         if discount_percent > 0 and discount_price is not None:
             expected_price = round(price * (1.0 - (discount_percent / 100.0)), 2)
-            if abs(discount_price - expected_price) > 0.50:
+            if abs(discount_price - expected_price) > 0.01:
                 raise ValueError(
                     f"SKU '{sku}' has contradictory discount_price ({discount_price}) and discount_percent ({discount_percent}%). "
-                    f"Expected discount price was {expected_price}."
+                    f"Exact expected discount price is {expected_price}."
                 )
+        elif discount_percent == 0.0 and discount_price is not None:
+            if abs(discount_price - price) > 0.01:
+                raise ValueError(
+                    f"SKU '{sku}' specifies discount_price {discount_price} but discount_percent is 0%. Prices must match."
+                )
+
+        offer_valid_until = str(row.get("offer_valid_until") or "").strip() or None
 
         return CatalogItem(
             sku=sku,
@@ -190,6 +197,7 @@ class CatalogLoader:
             discount_price=discount_price,
             offer_description_en=str(row.get("offer_description_en") or "").strip() or None,
             offer_description_ar=str(row.get("offer_description_ar") or "").strip() or None,
+            offer_valid_until=offer_valid_until,
             category=str(row.get("category") or "").strip(),
         )
 
@@ -210,7 +218,6 @@ class CatalogLoader:
         records = []
         with open(path, mode="r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            # Validate required headers
             required_headers = {"sku", "title_en", "title_ar", "price"}
             if not reader.fieldnames or not required_headers.issubset(set(reader.fieldnames)):
                 missing = required_headers - set(reader.fieldnames or [])

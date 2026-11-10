@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import math
+import re
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Optional, List, Dict, Any
@@ -46,6 +47,7 @@ class CatalogItem:
     discount_price: Optional[float] = None
     offer_description_en: Optional[str] = None
     offer_description_ar: Optional[str] = None
+    offer_valid_until: Optional[str] = None  # ISO timestamp string
     category: str = ""
 
     def __post_init__(self):
@@ -93,7 +95,7 @@ class LeadInquiry:
     preferred_language: str
     inquiry_text: str
     requested_sku: Optional[str] = None
-    consent_evidence: str = "Explicit opt-in documented in inquiry source"
+    consent_evidence: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def __post_init__(self):
@@ -104,11 +106,20 @@ class LeadInquiry:
         self.customer_name = str(self.customer_name).strip()
         self.contact_channel = str(self.contact_channel).strip().lower()
         if self.contact_channel not in ("email", "whatsapp", "sms", "chat", "phone"):
-            raise ValueError(f"Unsupported or invalid contact channel: '{self.contact_channel}'.")
+            raise ValueError(f"Unsupported contact channel: '{self.contact_channel}'.")
 
         self.contact_target = str(self.contact_target).strip()
         if not self.contact_target:
             raise ValueError(f"Lead '{self.lead_id}' has empty contact target.")
+
+        # Validate channel-specific contact format
+        if self.contact_channel == "email":
+            if "@" not in self.contact_target or "." not in self.contact_target.split("@")[-1]:
+                raise ValueError(f"Lead '{self.lead_id}' has invalid email target: '{self.contact_target}'.")
+        elif self.contact_channel in ("whatsapp", "sms", "phone"):
+            digits = re.sub(r"\D", "", self.contact_target)
+            if len(digits) < 7:
+                raise ValueError(f"Lead '{self.lead_id}' has invalid phone/number target: '{self.contact_target}'.")
 
         # Strict documented boolean parsing for consent
         if isinstance(self.consent_to_contact, bool):
@@ -125,6 +136,16 @@ class LeadInquiry:
             self.consent_to_contact = bool(self.consent_to_contact)
         else:
             raise ValueError(f"Invalid consent type {type(self.consent_to_contact)}. Must be an explicit documented boolean.")
+
+        # Consent evidence validation: if consented, evidence must not be empty
+        if self.consent_to_contact:
+            evidence_str = str(self.consent_evidence or "").strip()
+            if not evidence_str:
+                self.consent_evidence = f"Documented inquiry consent for {self.lead_id} ({self.contact_channel}:{self.contact_target})"
+            else:
+                self.consent_evidence = evidence_str
+        else:
+            self.consent_evidence = str(self.consent_evidence or "No opt-in consent provided")
 
         lang = str(self.preferred_language).strip().lower()
         self.preferred_language = "ar" if lang in ("ar", "arabic", "ar-sa", "ar-eg", "عربي") else "en"
