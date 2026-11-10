@@ -327,6 +327,8 @@ class CommercialClaimVerifier:
             # Must not contain delimiters, dashes, or clausal connectives
             if re.search(r"[\.!\;؛:?\n\r,،/\\|~^—–&＆@#$%\*]", comp) or re.search(r"[—–]|--|(?:\s-)|(?:-\s)", comp):
                 return False
+            if "\u0640" in comp:  # Arabic tatweel / kashida joins words without whitespace -> reject
+                return False
             if cls._CLAUSAL_CONNECTIVES_AR.search(comp):
                 return False
 
@@ -365,9 +367,10 @@ class CommercialClaimVerifier:
             if pred_matched in cls._ADJECTIVE_PREDICATES_AR:
                 return claim_clean == ""
 
-            # Whitelist: Arabic claim text must strictly consist of Arabic letters, digits, and spaces only.
-            # All hyphens, dashes (including U+2010, U+2212, em/en dash), underscores, and punctuation are rejected.
-            if not re.match(r"^[\u0600-\u06FF\s0-9]+$", claim_clean):
+            # Whitelist: Arabic claim text must strictly consist of pure Arabic letters (excluding tatweel \u0640),
+            # digits (0-9 and Arabic-Indic \u0660-\u0669), and ASCII space ' ' only.
+            # All hyphens, dashes (U+2010, U+2212, em/en dash), underscores, tatweel, and punctuation are rejected.
+            if not re.match(r"^[\u0621-\u063A\u0641-\u064A0-9\u0660-\u0669 ]+$", claim_clean):
                 return False
 
             words = claim_clean.split()

@@ -1,25 +1,23 @@
 # Independent acceptance verdict: CHANGES_REQUESTED
 
-Reviewed commit `a392b09` against `2c38ada`. The working tree was clean at the start of the review. CC-001 is not accepted.
+Reviewed commit `4535294` against `a392b09`, focusing on `catalog_copilot/verifier.py`. The working tree was clean at the start of review. CC-001 is not accepted.
 
-## Finding: Arabic claim validation permits other Unicode hyphens and dashes
+## Finding: Arabic-block characters can conceal a secondary assertion
 
-**Medium — `catalog_copilot/verifier.py:368–378`.** The new Arabic check rejects ASCII hyphen-minus, underscore, em dash and en dash, but does not reject other dash characters. The subsequent whitespace split treats a compound containing one of these characters as one word. In the full verifier, both of the following returned **PASS**, contrary to the requirement that Arabic claim phrases disallow hyphens and dashes:
+**High — `catalog_copilot/verifier.py:368–385`.** The new expression `^[\u0600-\u06FF\s0-9]+$` excludes the reported U+2010 and U+2212 characters, but the Arabic Unicode block is not limited to letters and digits: it also includes punctuation and U+0640 ARABIC TATWEEL. Moreover, `\s` includes Unicode whitespace. The comment that all punctuation is rejected is therefore inaccurate. The subsequent whitespace-based word count and boundary-based banned-word check can treat a compound containing these characters as one acceptable word.
 
-- `هل صحيح أن SKU-A يحتوي اسبستوس‐مادة؟` (U+2010 HYPHEN)
-- `هل صحيح أن SKU-A يحتوي اسبستوس−مادة؟` (U+2212 MINUS SIGN)
+In the full verifier, the following inquiry returns **PASS**, although it embeds the unsupported secondary assertion that asbestos causes cancer:
 
-Reproduction: use a consented lead whose inquiry is the probe, an active in-stock `SKU-A` priced at 100 SAR, and verify `Regarding your question, "<probe>", Standard Item A is in stock for 100 SAR.` with target SKU `SKU-A`. The accepted character can join words into an unchecked compound, undermining the intended fail-closed boundary. Reject Unicode dash/hyphen variants in Arabic claim text or constrain the permitted characters, and add full-verifier regressions. Preserve the ASCII hyphen in the SKU subject.
+- `هل صحيح أن SKU-A يحتوي اسبستوسـيسببـالسرطان؟` (U+0640 joins the words)
 
-## Review 12 and English validation
+The punctuation examples `هل صحيح أن SKU-A يحتوي اسبستوس۔مادة؟` (U+06D4) and `هل صحيح أن SKU-A يحتوي اسبستوس؍مادة؟` (U+060D) also return **PASS**, contrary to the stated punctuation restriction. These are distinct from the fixed Unicode dash examples. A passing quoted inquiry can be included in an otherwise verified draft and approved for dispatch, despite the ungrounded embedded assertion.
 
-The three reported hyphenated secondary predicates now return **UNCERTAIN** through the full verifier: `linked-to-cancer`, `known-to-cause-cancer`, and `proven-carcinogenic`. The English claim phrase is checked against the requested character pattern; each ASCII-hyphenated token must match the numeric measurement pattern; and alphabetic subwords are checked against the preposition and extra-verb lists and the `-ed`/`-ing` suffix rule, with existing short-word exceptions. These rules address the reported examples. They are heuristic filters, not proof that every possible secondary predicate is recognized.
+Reproduction: use the existing `TestCodexAdversarialFindings` fixture: a consented lead whose inquiry is the probe, active in-stock `SKU-A` priced at 100 SAR, and draft `Regarding your question, "<probe>", Standard Item A is in stock for 100 SAR.` Call `verify` with target SKU `SKU-A`. Constrain or normalize the permitted characters and token boundaries so that punctuation and joining characters cannot conceal secondary predicates, and add full-verifier regressions. Preserve the separately parsed SKU subject and legitimate single-claim inquiries.
 
-## Verification performed
+## Review 13 and requested verification
 
-All probes used the full `verify` method with the consented catalog fixture and quoted-question draft described above.
+The specific Review 13 finding is resolved: the U+2010 and U+2212 examples return **UNCERTAIN**, while the ASCII hyphen in `SKU-A` remains accepted in the requested legitimate inquiries. The whitelist does reject characters outside its explicit range, but the range itself does not implement the described letters-and-digits-only policy.
 
-- All seven requested adversarial inquiries returned **UNCERTAIN**, including the three hyphenated English examples, the two space-separated English examples, and both Arabic examples.
-- All ten requested legitimate inquiries returned **PASS**, including the `2-year warranty` question. This warranty case was checked separately; it is not in the existing pure-inquiry regression list.
-- `python3 -m unittest discover -s tests -v`: **61 tests passed**.
-- The two additional Unicode Arabic punctuation probes above returned **PASS**, establishing the remaining finding despite the passing suite.
+The full-verifier regression fixture exercised all seven requested adversarial inquiries; each returned **UNCERTAIN**. It also exercised all ten requested legitimate inquiries; each returned **PASS**, including the `2-year warranty` and Arabic `SKU-A` inquiries. These results are assertions in `test_codex_review10_truth_evaluating_questions_must_not_conceal_ungrounded_assertions`.
+
+`python3 -m unittest discover -s tests -v` completed successfully: **61 tests passed**. The three additional probes above were run separately through the full verifier and returned **PASS**.
