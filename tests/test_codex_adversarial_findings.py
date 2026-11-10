@@ -289,9 +289,9 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         reserved = ledger.reserve_for_export(batch_manifest_id=manifest_id, export_destination=csv_dest)
         self.assertEqual(len(reserved), 1)
 
-        # Write CSV on disk as if worker wrote it
+        # Write CSV on disk as if worker wrote it with matching batch_manifest_id
         with open(csv_dest, "w", encoding="utf-8") as f:
-            f.write("draft_id,lead_id\nDRAFT-FAILSAFE-01,LEAD-FAILSAFE-01\n")
+            f.write(f"batch_manifest_id,draft_id,lead_id\n{manifest_id},DRAFT-FAILSAFE-01,LEAD-FAILSAFE-01\n")
 
         # Now simulate crash recovery:
         rec_stats = engine.recover_interrupted_exports(interrupted_dir)
@@ -380,6 +380,154 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             "Lead with consent=True but missing evidence must fail verification.",
         )
         self.assertTrue(any("Missing auditable opt-in evidence" in r for r in report.reasons))
+
+    def test_codex_review3_finding1_customer_inquiry_cannot_authorize_unsupported_assertion(self):
+        """Review 3 Finding 1: Inquiry text ('contains asbestos?') must NEVER authorize merchant assertion."""
+        inquiry_lead = LeadInquiry(
+            lead_id="LEAD-INQ-1",
+            customer_name="Curious Customer",
+            contact_channel="email",
+            contact_target="curious@example.com",
+            consent_to_contact=True,
+            consent_evidence="Web form opt-in 2026-11-10",
+            preferred_language="en",
+            inquiry_text="Is it true SKU-A contains asbestos?",
+            requested_sku="SKU-A",
+        )
+
+        # 1. Direct ungrounded assertion MUST fail-closed to UNCERTAIN
+        report_unsupported = self.verifier.verify(
+            lead=inquiry_lead,
+            catalog=self.catalog,
+            draft_text="SKU-A contains asbestos.",
+            target_sku="SKU-A",
+        )
+        self.assertEqual(
+            report_unsupported.status,
+            VerificationStatus.UNCERTAIN,
+            "Merchant asserting 'SKU-A contains asbestos.' based on inquiry question must be UNCERTAIN.",
+        )
+        self.assertTrue(report_unsupported.requires_human_intervention)
+
+        # 2. Echoing the question inside explicit quotes with catalog-grounded answer MUST PASS
+        report_quoted = self.verifier.verify(
+            lead=inquiry_lead,
+            catalog=self.catalog,
+            draft_text="Regarding your question 'Is it true SKU-A contains asbestos?', Standard Item A is in stock for 100 SAR.",
+            target_sku="SKU-A",
+        )
+        self.assertEqual(
+            report_quoted.status,
+            VerificationStatus.PASS,
+            "Quoting customer inquiry with valid catalog facts must PASS.",
+        )
+
+    def test_codex_review3_finding2_foreign_file_collision_does_not_finalize_unpublished_draft(self):
+        """Review 3 Finding 2: A foreign file collision at export destination must NOT mark drafts EXPORTED."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-COLLISION-1",
+            lead_id="LEAD-COLLISION-1",
+            customer_name="Collision Tester",
+            contact_channel="email",
+            contact_target="collision@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Order",
+            body="Standard Item A is in stock for 100 SAR.",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Standard Item A is in stock for 100 SAR.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Opt-in #999",
+        )
+        ledger.save_draft(draft)
+        ledger.approve("DRAFT-COLLISION-1", reviewer="Reviewer Collision")
+
+        collision_dir = os.path.join(self.tmp_dir.name, "collision_dir")
+        os.makedirs(collision_dir, exist_ok=True)
+        foreign_dest = os.path.join(collision_dir, "foreign_export.csv")
+
+        # Create a foreign file before export
+        with open(foreign_dest, "w", encoding="utf-8") as f:
+            f.write("foreign data that is not our export\n")
+
+        # Attempting export without overwrite must raise FileExistsError
+        with self.assertRaises(FileExistsError):
+            engine.export_approved_to_csv(foreign_dest, overwrite=False)
+
+        # Destination must still contain the foreign data unchanged
+        with open(foreign_dest, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertEqual(content, "foreign data that is not our export\n")
+
+        # The draft must NOT be marked EXPORTED, reservation must be released, and still available in queue
+        db_draft = ledger.get_draft("DRAFT-COLLISION-1")
+        self.assertEqual(db_draft.approval_status, ApprovalStatus.APPROVED)
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT reservation_token FROM drafts WHERE draft_id = ?", ("DRAFT-COLLISION-1",))
+            row = cursor.fetchone()
+            self.assertIsNone(row[0])
+
+        approved_queue = ledger.get_approved_for_dispatch()
+        self.assertEqual(len(approved_queue), 1)
+        self.assertEqual(approved_queue[0].draft_id, "DRAFT-COLLISION-1")
+
+    def test_codex_review3_finding3_unreserved_draft_cannot_be_marked_exported_by_arbitrary_token(self):
+        """Review 3 Finding 3: mark_exported on an unreserved draft or token mismatch must return 0."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-OWNERSHIP-1",
+            lead_id="LEAD-OWNERSHIP-1",
+            customer_name="Ownership Tester",
+            contact_channel="email",
+            contact_target="owner@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Order",
+            body="Standard Item A is in stock for 100 SAR.",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Standard Item A is in stock for 100 SAR.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Opt-in #1000",
+        )
+        ledger.save_draft(draft)
+        ledger.approve("DRAFT-OWNERSHIP-1", reviewer="Reviewer Ownership")
+
+        # Draft is APPROVED but NOT reserved (reservation_token is NULL)
+        count = ledger.mark_exported(["DRAFT-OWNERSHIP-1"], batch_manifest_id="stale")
+        self.assertEqual(count, 0, "mark_exported on unreserved draft must return 0.")
+
+        db_draft = ledger.get_draft("DRAFT-OWNERSHIP-1")
+        self.assertEqual(db_draft.approval_status, ApprovalStatus.APPROVED)
+
+        # Now reserve under legitimate token EXP-ACTIVE
+        reserved = ledger.reserve_for_export(
+            batch_manifest_id="EXP-ACTIVE",
+            export_destination="/tmp/legit_export.csv",
+        )
+        self.assertEqual(len(reserved), 1)
+
+        # Mismatched token must return 0 and NOT mark EXPORTED
+        mismatch_count = ledger.mark_exported(["DRAFT-OWNERSHIP-1"], batch_manifest_id="EXP-WRONG")
+        self.assertEqual(mismatch_count, 0)
+        self.assertEqual(ledger.get_draft("DRAFT-OWNERSHIP-1").approval_status, ApprovalStatus.APPROVED)
+
+        # Matching token must successfully transition to EXPORTED
+        success_count = ledger.mark_exported(["DRAFT-OWNERSHIP-1"], batch_manifest_id="EXP-ACTIVE")
+        self.assertEqual(success_count, 1)
+        self.assertEqual(ledger.get_draft("DRAFT-OWNERSHIP-1").approval_status, ApprovalStatus.EXPORTED)
 
 
 if __name__ == "__main__":

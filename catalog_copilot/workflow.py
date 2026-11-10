@@ -18,7 +18,7 @@ from .models import (
 from .catalog import CatalogLoader, Catalog
 from .generator import DraftGenerator
 from .verifier import CommercialClaimVerifier
-from .approval import ApprovalLedger
+from .approval import ApprovalLedger, _is_proven_published_for_token
 
 
 class BatchWorkflowEngine:
@@ -156,6 +156,7 @@ class BatchWorkflowEngine:
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
         fieldnames = [
+            "batch_manifest_id",
             "draft_id",
             "lead_id",
             "customer_name",
@@ -174,6 +175,7 @@ class BatchWorkflowEngine:
 
         tmp_csv_path: Optional[str] = None
         tmp_mf_path: Optional[str] = None
+        published_csv = False
 
         try:
             # 2. Stage CSV file in temporary file
@@ -185,6 +187,7 @@ class BatchWorkflowEngine:
                 writer.writeheader()
                 for draft in reserved_drafts:
                     writer.writerow({
+                        "batch_manifest_id": batch_manifest_id,
                         "draft_id": draft.draft_id,
                         "lead_id": draft.lead_id,
                         "customer_name": draft.customer_name,
@@ -222,6 +225,7 @@ class BatchWorkflowEngine:
             # 4. Atomic file publication with no-clobber protection
             if overwrite:
                 os.replace(tmp_csv_path, out_p)
+                published_csv = True
                 tmp_csv_path = None
                 os.replace(tmp_mf_path, manifest_p)
                 tmp_mf_path = None
@@ -229,6 +233,7 @@ class BatchWorkflowEngine:
                 # Atomic hard-link fails with FileExistsError if destination already exists!
                 try:
                     os.link(tmp_csv_path, out_p)
+                    published_csv = True
                     os.unlink(tmp_csv_path)
                     tmp_csv_path = None
                 except FileExistsError:
@@ -253,8 +258,8 @@ class BatchWorkflowEngine:
 
         except Exception:
             # Reconcile publication status before any cleanup or release:
-            # If CSV was published on disk, it is published! Do NOT release reservation!
-            if out_p.exists() and out_p.stat().st_size > 0:
+            # Only finalize if THIS worker's CSV publication succeeded and matches token identity!
+            if published_csv and _is_proven_published_for_token(out_p, batch_manifest_id):
                 if tmp_mf_path and os.path.exists(tmp_mf_path):
                     try:
                         if not manifest_p.exists():
@@ -266,10 +271,16 @@ class BatchWorkflowEngine:
                 # Finalize export so messages are never duplicated
                 self.ledger.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
             else:
-                # CSV was not published: safe to remove temp files and release reservation
+                # CSV was not published by this worker: safe to remove temp files and release reservation
                 if tmp_csv_path and os.path.exists(tmp_csv_path):
-                    os.remove(tmp_csv_path)
+                    try:
+                        os.remove(tmp_csv_path)
+                    except Exception:
+                        pass
                 if tmp_mf_path and os.path.exists(tmp_mf_path):
-                    os.remove(tmp_mf_path)
+                    try:
+                        os.remove(tmp_mf_path)
+                    except Exception:
+                        pass
                 self.ledger.release_reservation(batch_manifest_id)
             raise

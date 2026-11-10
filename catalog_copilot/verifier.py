@@ -74,7 +74,7 @@ class CommercialClaimVerifier:
         "of", "inventory", "at", "the", "price", "regular", "with", "an",
         "active", "discount", "off", "please", "let", "know", "if",
         "would", "like", "to", "proceed", "order", "or", "have",
-        "additional", "questions", "assist", "alternative", "could",
+        "additional", "questions", "question", "asking", "asked", "assist", "alternative", "could",
         "confirm", "specific", "so", "we", "can", "provide", "exact",
         "pricing", "and", "details", "best", "regards", "customer",
         "sales", "team", "support", "valued", "a", "an", "the", "this",
@@ -271,8 +271,12 @@ class CommercialClaimVerifier:
         if catalog_item:
             cat_desc = f"{catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}".lower()
 
+        # Customer inquiries must NEVER authorize merchant assertions. Echoed customer inquiries
+        # may appear inside explicit quotes ("..." or '...'). We strip unquoted text for merchant claim verification.
+        draft_text_unquoted = re.sub(r'(?<!\w)[\'\"«»“”](.+?)[\'\"«»“”](?!\w)', ' ', draft_text)
+
         for pattern in self._UNGROUNDED_PATTERNS:
-            match = pattern.search(draft_text)
+            match = pattern.search(draft_text_unquoted)
             if match:
                 term = match.group(0).strip()
                 if (not catalog_item) or (term.lower() not in cat_desc):
@@ -287,7 +291,7 @@ class CommercialClaimVerifier:
                     overall_status = VerificationStatus.UNCERTAIN
 
         for pred_pattern in self._PREDICATE_ASSERTIONS:
-            for match in pred_pattern.finditer(draft_text):
+            for match in pred_pattern.finditer(draft_text_unquoted):
                 pred_val = match.group(1).strip().lower()
                 if pred_val not in self._BENIGN_PREDICATES and len(pred_val) >= 3:
                     if (not catalog_item) or (pred_val not in cat_desc):
@@ -302,7 +306,7 @@ class CommercialClaimVerifier:
                         overall_status = VerificationStatus.UNCERTAIN
 
         # Comprehensive vocabulary and assertion grounding check:
-        # Every content word in the draft must be grounded in catalog item data, customer inquiry, or transactional boilerplate.
+        # Every content word in the draft must be grounded in catalog item data or transactional boilerplate.
         allowed_tokens = set(self._TRANSACTIONAL_WORDS_EN) | set(self._TRANSACTIONAL_WORDS_AR)
         if catalog_item:
             catalog_raw = f"{catalog_item.sku} {catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}"
@@ -313,11 +317,9 @@ class CommercialClaimVerifier:
             allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.customer_name))
             allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", lead.customer_name))
 
-        if lead.inquiry_text:
-            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.inquiry_text))
-            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", lead.inquiry_text))
-
-        sentences = [s.strip() for s in re.split(r"[\n.!?؛\r]+", draft_text) if s.strip()]
+        # Note: Customer inquiry text is NEVER added to allowed vocabulary because customer questions
+        # cannot authorize product claims. Inquiries may only appear in explicit quotes ('...').
+        sentences = [s.strip() for s in re.split(r"[\n.!?؛\r]+", draft_text_unquoted) if s.strip()]
         for sentence in sentences:
             sentence_clean = sentence.translate(_ARABIC_INDIC_DIGITS)
             words = re.findall(r"[\w\-]+", sentence_clean)

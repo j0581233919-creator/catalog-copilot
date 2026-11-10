@@ -357,6 +357,12 @@ class TestApprovalLedger(unittest.TestCase):
         self.assertEqual(len(approved_list), 1)
         self.assertEqual(approved_list[0].draft_id, "D-DISP-1")
 
+        reserved = self.ledger.reserve_for_export(
+            batch_manifest_id="TEST-MANIFEST-1",
+            export_destination="/tmp/test_export.csv",
+        )
+        self.assertEqual(len(reserved), 1)
+
         self.ledger.mark_exported(["D-DISP-1"], batch_manifest_id="TEST-MANIFEST-1")
         self.assertEqual(len(self.ledger.get_approved_for_dispatch()), 0)
 
