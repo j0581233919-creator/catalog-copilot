@@ -209,11 +209,32 @@ class CommercialClaimVerifier:
         re.IGNORECASE,
     )
 
+    _PREPOSITIONS_EN = {
+        "to", "for", "with", "by", "from", "in", "at", "on", "about",
+        "against", "of", "into", "through", "over", "under", "via", "without",
+    }
+    _VERB_SUFFIXES_EN = re.compile(r"(?:ed|ing)$", re.IGNORECASE)
+    _EXTRA_VERBS_EN = {
+        "cause", "causes", "caused", "causing", "leads", "leading", "kills", "killing", "harms", "harming",
+        "contain", "contains", "contained", "containing", "known", "proven", "made", "linked", "associated",
+        "become", "becomes", "became", "becoming", "have", "has", "had", "is", "are", "was", "were", "do", "does", "did",
+    }
+
+    _ADJECTIVE_PREDICATES_AR = {"أصلي", "غير أصلي", "مقلد", "سام", "مغشوش", "ضار", "مسرطن"}
+    _PREPOSITIONS_AR = {"في", "من", "إلى", "الى", "عن", "مع", "لـ", "بـ", "بين", "حول", "ضد"}
+    _BANNED_AR_WORDS = re.compile(
+        r"\b(?:"
+        r"يسبب|تسبب|يؤدي|تؤدي|يضر|تضر|ينتج|تنتج|يقتل|تقتل|يتلف|تتلف|"
+        r"سبب|أدى|ادى|ضر|أضر|اضر|نتج|قتل|اتلف|أحدث|احدث|"
+        r"خطير|خطيرة|سام|سامة|ضار|ضارة|مسرطن|مسرطنة|قاتل|قاتلة|مغشوش|مغشوشة|مضر|مضرة"
+        r")\b"
+    )
+
     @classmethod
     def _is_valid_truth_evaluating_complement(cls, body: str, allowed_tokens: Optional[Set[str]] = None) -> bool:
         """Validates that a truth-evaluating inquiry consists strictly of a single, unadorned
         complement proposition regarding the catalog product, without conditional, temporal,
-        causal, or coordinate secondary assertion clauses.
+        causal, or coordinate secondary assertion clauses, and with zero secondary predicates.
         """
         # Match English starter
         m_en = cls._TRUTH_EVALUATING_STARTERS[0].match(body)
@@ -253,19 +274,38 @@ class CommercialClaimVerifier:
             if not verb_m:
                 return False
 
-            # After the single verb phrase, we have the claim noun phrase
+            verb_matched = verb_m.group(0).lower()
             claim_phrase = rest[verb_m.end():].strip()
             if not claim_phrase:
                 return False
 
-            # Claim phrase must NOT contain any secondary verbs
-            if cls._SECONDARY_VERBS_EN.search(claim_phrase):
-                return False
-
-            # Claim phrase must be concise (at most 4 words)
             words = claim_phrase.split()
-            if len(words) > 4:
-                return False
+            # Copular verb validation
+            if (verb_matched.startswith("is") or verb_matched.startswith("are") or
+                    verb_matched.startswith("was") or verb_matched.startswith("were")):
+                if "made" in verb_matched:
+                    if len(words) != 1:
+                        return False
+                else:
+                    if len(words) == 1:
+                        pass
+                    elif len(words) == 2 and words[0].lower() in ("a", "an"):
+                        pass
+                    else:
+                        return False
+            else:
+                # Transitive verb validation: at most 2 words, or 3 if starting with an article
+                if len(words) > 3:
+                    return False
+                if len(words) == 3 and words[0].lower() not in ("a", "an", "the"):
+                    return False
+
+            for w in words:
+                w_lower = w.lower()
+                if w_lower in cls._PREPOSITIONS_EN or w_lower in cls._EXTRA_VERBS_EN:
+                    return False
+                if len(w_lower) > 3 and cls._VERB_SUFFIXES_EN.search(w_lower) and w_lower not in ("red", "bed", "led"):
+                    return False
 
             return True
 
@@ -305,21 +345,31 @@ class CommercialClaimVerifier:
             if not svo_m and not vso_m:
                 return False
 
+            pred_matched = svo_m.group(2) if svo_m and not allowed_subj_m else (vso_m.group(1) if vso_m else (svo_m.group(1) if allowed_subj_m else ""))
             claim_part = (svo_m.group(3) if (svo_m and svo_m.lastindex and svo_m.lastindex >= 3)
                           else (vso_m.group(3) if (vso_m and vso_m.lastindex and vso_m.lastindex >= 3)
                                 else (svo_m.group(2) if (allowed_subj_m and svo_m and svo_m.lastindex and svo_m.lastindex >= 2) else None)))
-            if claim_part:
-                claim_part = claim_part.strip()
-                # Claim part must not contain another predicate
-                if re.search(pred_pattern, claim_part):
-                    return False
-                # Nor any auxiliary/copula verbs
-                if re.search(r"\b(?:كان|كانت|يكون|تكون|أصبح|اصبح|أصبحت|اصبحت|صار|صارت|يوجد|توجد)\b", claim_part):
-                    return False
-                if len(claim_part.split()) > 4:
-                    return False
 
-            return True
+            claim_clean = claim_part.strip() if claim_part else ""
+            if pred_matched in cls._ADJECTIVE_PREDICATES_AR:
+                return claim_clean == ""
+
+            words = claim_clean.split()
+            if not words:
+                return False
+            if len(words) == 1:
+                w = words[0]
+                if w in cls._PREPOSITIONS_AR or cls._BANNED_AR_WORDS.search(w):
+                    return False
+                return True
+            elif len(words) == 2:
+                if words[0] != "على":
+                    return False
+                w = words[1]
+                if w in cls._PREPOSITIONS_AR or cls._BANNED_AR_WORDS.search(w):
+                    return False
+                return True
+            return False
 
         return False
 
