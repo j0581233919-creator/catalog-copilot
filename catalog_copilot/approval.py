@@ -143,7 +143,7 @@ def _is_proven_published_for_token(
                         return False
                     if (r.get("reviewed_by") or "").strip() != (exp_draft.reviewed_by or "").strip():
                         return False
-                    if (r.get("reviewed_at") or "").strip() != (exp_draft.reviewed_at or "").strip():
+                    if r.get("reviewed_at") != (exp_draft.reviewed_at or ""):
                         return False
                     exp_status_val = exp_draft.approval_status.value if isinstance(exp_draft.approval_status, ApprovalStatus) else str(exp_draft.approval_status)
                     if (r.get("approval_status") or "").strip() != exp_status_val.strip():

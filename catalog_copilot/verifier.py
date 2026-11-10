@@ -117,6 +117,61 @@ class CommercialClaimVerifier:
         "GBP": "GBP", "POUNDS": "GBP", "POUND": "GBP", "باوند": "GBP", "£": "GBP",
     }
 
+    _INTERROGATIVE_STARTERS_EN = re.compile(
+        r"^(?:"
+        r"is|are|was|were|am|do|does|did|can|could|will|would|shall|should|may|might|must|have|has|had|"
+        r"what|which|who|whom|whose|where|when|why|how|"
+        r"is\s+it\s+(?:true|possible|correct)|can\s+you\s+(?:tell|confirm|clarify)|do\s+you\s+(?:have|know)|could\s+you\s+(?:please\s+)?(?:tell|confirm|clarify)"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    _INTERROGATIVE_STARTERS_AR = re.compile(
+        r"^(?:"
+        r"هل|[أإا]|ما|ماذا|من|متى|[أإا]ين|كيف|كم|[أإا]ي|[أإا]يها|[أإا]ينما|لماذا|لم|"
+        r"هل\s+صحيح|هل\s+من\s+الممكن|هل\s+يمكن|[أإا]يمكن|هل\s+تتوفر|هل\s+يوجد|هل\s+يتوفر|[أإا]رجو\s+توضيح|هل\s+بالإمكان"
+        r")(?:\s+|$)",
+    )
+
+    @classmethod
+    def _is_pure_interrogative_clause(cls, text: str) -> bool:
+        """Determines if a clause is strictly an interrogative question without declarative assertions.
+        Must end with ? or ؟, contain no internal sentence/clause boundaries, and start with an interrogative starter.
+        """
+        t = text.strip()
+        if not t or not re.search(r"[\?؟]$", t):
+            return False
+
+        body = t[:-1].strip()
+        # Must not contain internal question marks, periods, exclamation, semicolons, colons, or newlines
+        if re.search(r"[\.!\;؛:?\n\r؟]", body):
+            return False
+
+        # Must not contain clause boundaries like commas or dashes between clauses
+        # (Note: hyphen within a word/SKU like 'SKU-A' is allowed, but ' - ' or '--' is a clause boundary)
+        if re.search(r"[,،]|\s+[-—–]+\s+", body):
+            return False
+
+        # Must not contain compound conjunctions that connect a declarative statement to a question
+        if re.search(r"\b(?:and|but|yet|so)\b|\s+(?:و|لكن)\s+", body, re.IGNORECASE):
+            return False
+
+        # Must start with an interrogative question starter in English or Arabic
+        is_en = bool(cls._INTERROGATIVE_STARTERS_EN.match(body))
+        is_ar = bool(cls._INTERROGATIVE_STARTERS_AR.match(body))
+        return is_en or is_ar
+
+    @classmethod
+    def _extract_pure_interrogative_clauses(cls, text: str) -> List[str]:
+        """Extracts genuine, isolated interrogative question clauses from customer text."""
+        valid_clauses = []
+        pattern = r"(?:^|[\.!\;؛:\n\r,،]|\b(?:and|but|yet|so)\b|\s+(?:و|لكن)\s+)\s*([^.!?؛;:\n\r,،]+?[\?؟])"
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            candidate = match.group(1).strip()
+            if cls._is_pure_interrogative_clause(candidate):
+                valid_clauses.append(candidate)
+        return valid_clauses
+
     @classmethod
     def _extract_all_prices_and_currencies(cls, text: str) -> List[Tuple[float, Optional[str]]]:
         """Extracts ALL numerical prices and currencies without skipping unanchored prices."""
@@ -283,6 +338,7 @@ class CommercialClaimVerifier:
         inquiry_raw = (lead.inquiry_text or "").strip()
         inquiry_clean = re.sub(r"\s+", " ", inquiry_raw).strip()
         is_inquiry_question = bool(re.search(r"[\?؟]", inquiry_clean))
+        valid_inquiry_clauses = self._extract_pure_interrogative_clauses(inquiry_clean) if is_inquiry_question else []
 
         attribution_prefixes = [
             re.compile(r"(?:regarding|about|for|answering|in response to)\s+(?:your\s+)?(?:question|inquiry|inquiries)\s*[:,\-]?\s*$", re.IGNORECASE),
@@ -297,23 +353,13 @@ class CommercialClaimVerifier:
             if not inquiry_clean or len(span_clean) < 3:
                 return f" {span_content} "
 
-            # 1. Declarative customer statements or mixed assertions can NEVER be exempted from grounding.
-            # An interrogative quotation must be a single clause ending in ? or ؟ with NO internal sentence boundaries.
-            if not is_inquiry_question:
+            # 1. The quoted text MUST be an isolated pure interrogative clause (no declarative assertions, no mixed clauses)
+            if not self._is_pure_interrogative_clause(span_clean):
                 return f" {span_content} "
 
-            has_question_mark = bool(re.search(r"[\?؟]$", span_clean))
-            if not has_question_mark:
-                return f" {span_content} "
-
-            # Cannot contain internal sentence boundaries (. ! ; ؛) before the final question mark
-            if re.search(r"[\.!\;؛]", span_clean[:-1]):
-                return f" {span_content} "
-
-            # 2. Extract genuine interrogative question clauses from customer inquiry that end in ? or ؟
-            raw_clauses = [c.strip() for c in re.findall(r"[^.!?؛;\n\r]+[\?؟]", inquiry_clean) if c.strip()]
-            matches_interrogative = any(span_clean.lower() == c.lower() for c in raw_clauses)
-            if not matches_interrogative:
+            # 2. Must match an isolated pure interrogative question clause extracted from customer inquiry
+            matches_inquiry = any(span_clean.lower() == c.lower() for c in valid_inquiry_clauses)
+            if not matches_inquiry:
                 return f" {span_content} "
 
             # 3. Must be immediately preceded by attribution framing in the draft text

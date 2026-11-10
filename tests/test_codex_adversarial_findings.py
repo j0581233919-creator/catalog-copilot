@@ -990,6 +990,19 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         )
         self.assertEqual(report_pure_q.status, VerificationStatus.PASS)
 
+        # 4. Comma-separated, conjunction-separated, and mixed bilingual assertions MUST return UNCERTAIN
+        from dataclasses import replace
+        for mixed_q in [
+            'SKU-A contains asbestos, is it available?',
+            'SKU-A contains asbestos and is it available?',
+            'SKU-A contains asbestos؟ هل هو متوفر؟',
+            'المنتج يحتوي أسبستوس، هل هو متوفر؟',
+        ]:
+            l_mix = replace(lead_mixed, inquiry_text=mixed_q)
+            d_mix = f'Regarding your question, "{mixed_q}", Standard Item A is in stock for 100 SAR.'
+            rep_mix = self.verifier.verify(lead=l_mix, catalog=self.catalog, draft_text=d_mix, target_sku="SKU-A")
+            self.assertEqual(rep_mix.status, VerificationStatus.UNCERTAIN, f"Mixed quote '{mixed_q}' must fail closed as UNCERTAIN.")
+
     def test_codex_review6_finding2_recovery_rejects_extra_fields_and_altered_approval_status(self):
         """Review 6 Finding 2: Recovery must reject rows with extra fields, altered approval_status, or altered timestamps."""
         ledger = ApprovalLedger(db_path=self.db_path)
@@ -1074,6 +1087,17 @@ class TestCodexAdversarialFindings(unittest.TestCase):
 
         rec_time = engine.recover_interrupted_exports(test_dir)
         self.assertEqual(len(rec_time["recovered"]), 0, "Row with altered reviewed_at must NOT be recovered.")
+
+        # Sub-test C2: Row has whitespace-padded timestamp -> Must be rejected by strict byte equality
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            altered_row = dict(valid_row_dict)
+            altered_row["reviewed_at"] = f" {res_draft.reviewed_at} "
+            writer = csv.DictWriter(f, fieldnames=list(valid_row_dict.keys()))
+            writer.writeheader()
+            writer.writerow(altered_row)
+
+        rec_ws = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_ws["recovered"]), 0, "Row with whitespace-padded reviewed_at must NOT be recovered.")
 
         # Sub-test D: Valid uncorrupted row matching reserved draft exactly -> Must be recovered
         with open(csv_dest, "w", encoding="utf-8", newline="") as f:
