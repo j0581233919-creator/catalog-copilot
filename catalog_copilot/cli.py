@@ -12,6 +12,7 @@ from .verifier import CommercialClaimVerifier
 from .generator import DraftGenerator
 from .approval import ApprovalLedger
 from .workflow import BatchWorkflowEngine
+from .tui import HumanReviewTUI
 
 
 def cmd_validate_catalog(args: argparse.Namespace) -> int:
@@ -54,6 +55,18 @@ def cmd_run_batch(args: argparse.Namespace) -> int:
 def cmd_review(args: argparse.Namespace) -> int:
     try:
         ledger = ApprovalLedger(db_path=args.db)
+
+        if getattr(args, "interactive", False):
+            catalog = None
+            if getattr(args, "catalog", None):
+                c_path = Path(args.catalog)
+                catalog = CatalogLoader.load_json(c_path) if c_path.suffix.lower() == ".json" else CatalogLoader.load_csv(c_path)
+            tui = HumanReviewTUI(
+                ledger=ledger,
+                catalog=catalog,
+                reviewer=getattr(args, "reviewer", None),
+            )
+            return tui.run()
 
         if args.show:
             draft = ledger.get_draft(args.show)
@@ -113,6 +126,26 @@ def cmd_review(args: argparse.Namespace) -> int:
 
     except Exception as e:
         print(f"Review error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_tui(args: argparse.Namespace) -> int:
+    try:
+        ledger = ApprovalLedger(db_path=args.db)
+        catalog = None
+        if getattr(args, "catalog", None):
+            c_path = Path(args.catalog)
+            catalog = CatalogLoader.load_json(c_path) if c_path.suffix.lower() == ".json" else CatalogLoader.load_csv(c_path)
+        status_filter = None if getattr(args, "all", False) else ApprovalStatus.PENDING_REVIEW
+        tui = HumanReviewTUI(
+            ledger=ledger,
+            catalog=catalog,
+            reviewer=getattr(args, "reviewer", None),
+            status_filter=status_filter,
+        )
+        return tui.run()
+    except Exception as e:
+        print(f"TUI error: {e}", file=sys.stderr)
         return 1
 
 
@@ -302,6 +335,8 @@ def main() -> None:
     # review
     p_rev = subparsers.add_parser("review", help="Review and manage pending drafts")
     p_rev.add_argument("--db", "-d", default="catalog_copilot.db", help="Path to SQLite queue DB")
+    p_rev.add_argument("--catalog", "-c", help="Path to catalog CSV/JSON (for TUI inline edit re-verification)")
+    p_rev.add_argument("--interactive", "-i", action="store_true", help="Launch interactive human review TUI")
     p_rev.add_argument("--list", action="store_true", help="List all drafts")
     p_rev.add_argument("--show", help="Show full details of a single draft ID")
     p_rev.add_argument("--approve", help="Approve draft ID")
@@ -310,6 +345,14 @@ def main() -> None:
     p_rev.add_argument("--reason", help="Reason for rejection")
     p_rev.add_argument("--notes", help="Review notes")
     p_rev.set_defaults(func=cmd_review)
+
+    # tui
+    p_tui = subparsers.add_parser("tui", help="Launch interactive human review terminal interface")
+    p_tui.add_argument("--db", "-d", default="catalog_copilot.db", help="Path to SQLite queue DB")
+    p_tui.add_argument("--catalog", "-c", help="Path to catalog CSV/JSON (required for inline edit re-verification)")
+    p_tui.add_argument("--reviewer", "-r", help="Reviewer full name or identity")
+    p_tui.add_argument("--all", action="store_true", help="Review all drafts, not just pending")
+    p_tui.set_defaults(func=cmd_tui)
 
     # export-approved
     p_exp = subparsers.add_parser("export-approved", help="Export approved messages to CSV")

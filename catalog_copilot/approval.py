@@ -214,6 +214,8 @@ class ApprovalLedger:
                 conn.execute("ALTER TABLE drafts ADD COLUMN reservation_expires_at TEXT")
             if "reservation_destination" not in existing_columns:
                 conn.execute("ALTER TABLE drafts ADD COLUMN reservation_destination TEXT")
+            if "inquiry_text" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN inquiry_text TEXT DEFAULT ''")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -296,8 +298,9 @@ class ApprovalLedger:
                     draft_id, lead_id, customer_name, contact_channel, contact_target,
                     sku, language, subject, body, consent_to_contact, consent_evidence,
                     verification_status, verification_report_json, approval_status,
-                    reviewer_notes, reviewed_by, reviewed_at, is_dispatched, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reviewer_notes, reviewed_by, reviewed_at, is_dispatched, created_at,
+                    inquiry_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.draft_id,
@@ -319,6 +322,7 @@ class ApprovalLedger:
                     None,
                     0,
                     draft.created_at,
+                    getattr(draft, "inquiry_text", "") or "",
                 ),
             )
             self._log_audit_event(
@@ -345,12 +349,13 @@ class ApprovalLedger:
                 return None
             return self._row_to_draft(row)
 
-    def list_drafts(self, status: Optional[ApprovalStatus] = None) -> List[DraftMessage]:
+    def list_drafts(self, status: Optional[ApprovalStatus] = None, order_by_created: str = "ASC") -> List[DraftMessage]:
+        order_dir = "DESC" if str(order_by_created).upper() == "DESC" else "ASC"
         with self._get_connection() as conn:
             if status is not None:
-                cursor = conn.execute("SELECT * FROM drafts WHERE approval_status = ? ORDER BY created_at DESC", (status.value,))
+                cursor = conn.execute(f"SELECT * FROM drafts WHERE approval_status = ? ORDER BY created_at {order_dir}", (status.value,))
             else:
-                cursor = conn.execute("SELECT * FROM drafts ORDER BY created_at DESC")
+                cursor = conn.execute(f"SELECT * FROM drafts ORDER BY created_at {order_dir}")
             return [self._row_to_draft(row) for row in cursor.fetchall()]
 
     def approve(self, draft_id: str, reviewer: str, notes: Optional[str] = None) -> DraftMessage:
@@ -510,7 +515,7 @@ class ApprovalLedger:
                 contact_target=draft.contact_target,
                 consent_to_contact=draft.consent_to_contact,
                 preferred_language=draft.language,
-                inquiry_text="",
+                inquiry_text=getattr(draft, "inquiry_text", "") or "",
                 requested_sku=draft.sku,
                 consent_evidence=draft.consent_evidence,
             )
@@ -980,4 +985,5 @@ class ApprovalLedger:
             reviewed_by=row["reviewed_by"],
             reviewed_at=row["reviewed_at"],
             created_at=row["created_at"],
+            inquiry_text=row["inquiry_text"] if "inquiry_text" in row.keys() and row["inquiry_text"] else "",
         )

@@ -243,6 +243,7 @@ class DraftMessage:
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    inquiry_text: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -263,6 +264,7 @@ class DraftMessage:
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at,
             "created_at": self.created_at,
+            "inquiry_text": self.inquiry_text,
         }
 
     @classmethod
@@ -285,4 +287,5 @@ class DraftMessage:
             reviewed_by=data.get("reviewed_by"),
             reviewed_at=data.get("reviewed_at"),
             created_at=data.get("created_at", ""),
+            inquiry_text=data.get("inquiry_text", ""),
         )

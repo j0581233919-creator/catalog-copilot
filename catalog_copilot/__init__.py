@@ -17,6 +17,7 @@ from .verifier import CommercialClaimVerifier
 from .generator import DraftGenerator
 from .approval import ApprovalLedger
 from .workflow import BatchWorkflowEngine
+from .tui import HumanReviewTUI, TerminalFormatter
 
 __all__ = [
     "CatalogItem",
@@ -33,4 +34,6 @@ __all__ = [
     "DraftGenerator",
     "ApprovalLedger",
     "BatchWorkflowEngine",
+    "HumanReviewTUI",
+    "TerminalFormatter",
 ]

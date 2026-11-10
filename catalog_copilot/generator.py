@@ -88,6 +88,7 @@ class DraftGenerator:
             consent_to_contact=lead.consent_to_contact,
             consent_evidence=lead.consent_evidence,
             approval_status=ApprovalStatus.PENDING_REVIEW,
+            inquiry_text=lead.inquiry_text,
         )
 
     def _render_arabic_draft(self, lead: LeadInquiry, item: Optional[CatalogItem]) -> tuple[str, str]:
