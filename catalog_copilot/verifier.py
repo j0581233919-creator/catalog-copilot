@@ -273,29 +273,54 @@ class CommercialClaimVerifier:
 
         # Strict validation of customer inquiry quotations:
         # A merchant draft may quote a customer's inquiry only when:
-        # 1. The inquiry exists and the quoted text is genuinely a normalized substring of the customer's inquiry.
-        # 2. The quote is framed in inquiry-referencing attribution (e.g., 'regarding your question', 'inquiry', etc.).
-        # 3. The draft is not merely the quote, but contains grounded merchant response text.
+        # 1. The inquiry exists, and the quoted text is the exact inquiry or a full interrogative question clause.
+        # 2. If the customer inquiry contains an interrogative question (? or ؟), the quote MUST preserve that interrogative character (? or ؟).
+        # 3. The quote is immediately preceded by an explicit attribution phrase (e.g., 'regarding your question', 'in response to your inquiry', etc.).
+        # 4. The draft contains grounded merchant response text answering the customer.
         # Any quoted text that does not meet these criteria is treated as an assertion made by the merchant
         # and MUST be grounded in catalog facts.
         quote_pattern = re.compile(r'(?<!\w)[\'\"«»“”](.+?)[\'\"«»“”](?!\w)')
         inquiry_raw = (lead.inquiry_text or "").strip()
-        inquiry_norm = re.sub(r"[^\w\s]", "", inquiry_raw.lower())
+        inquiry_clean = re.sub(r"\s+", " ", inquiry_raw).strip()
+        is_inquiry_question = bool(re.search(r"[\?؟]", inquiry_clean))
 
-        attribution_markers = {
-            "regarding", "inquiry", "inquiring", "question", "questions", "asking", "asked",
-            "بخصوص", "استفسار", "استفساركم", "استفساراتكم", "سؤال", "سؤالكم", "وسؤالكم",
-        }
-        draft_words_lower = set(re.findall(r"[\w\-]+", draft_text.lower()))
-        has_attribution = bool(draft_words_lower & attribution_markers)
+        attribution_prefixes = [
+            re.compile(r"(?:regarding|about|for|answering|in response to)\s+(?:your\s+)?(?:question|inquiry|inquiries)\s*[:,\-]?\s*$", re.IGNORECASE),
+            re.compile(r"(?:thank\s+you\s+for\s+(?:asking|inquiring|contacting\s+us\s+about))\s*[:,\-]?\s*$", re.IGNORECASE),
+            re.compile(r"(?:بخصوص|رداً على|إجابة على|نشكركم على)\s+(?:استفساركم|سؤالكم|استفساراتكم)\s*[:،\-]?\s*$"),
+        ]
 
         def _strip_if_valid_quote(match: re.Match) -> str:
             span_content = match.group(1).strip()
-            span_norm = re.sub(r"[^\w\s]", "", span_content.lower())
-            if inquiry_norm and len(span_norm) >= 3 and span_norm in inquiry_norm and has_attribution:
-                return " "
-            # Not an attributed inquiry quotation: keep content so it is validated as a merchant claim!
-            return f" {span_content} "
+            span_clean = re.sub(r"\s+", " ", span_content).strip()
+
+            if not inquiry_clean or len(span_clean) < 3:
+                return f" {span_content} "
+
+            # 1. If inquiry was a question, the quote MUST preserve the interrogative meaning (? or ؟)
+            has_question_mark = bool(re.search(r"[\?؟]", span_clean))
+            if is_inquiry_question and not has_question_mark:
+                # Quoting without question mark turns a question into an assertion: REJECT
+                return f" {span_content} "
+
+            # 2. Quote must match the customer's inquiry text (case-insensitive) or an exact question sentence
+            inquiry_sentences = [s.strip() for s in re.split(r"[\n\r]+", inquiry_clean) if s.strip()]
+            matches_inquiry = (
+                span_clean.lower() == inquiry_clean.lower()
+                or any(span_clean.lower() == s.lower() for s in inquiry_sentences)
+            )
+            if not matches_inquiry:
+                return f" {span_content} "
+
+            # 3. Must be immediately preceded by attribution framing in the draft text
+            preceding_text = draft_text[:match.start()].strip()
+            last_tokens = " ".join(preceding_text.split()[-8:]) if preceding_text else ""
+            has_immediate_attribution = any(p.search(last_tokens) for p in attribution_prefixes)
+            if not has_immediate_attribution:
+                return f" {span_content} "
+
+            # Validated customer inquiry quote: safe to strip from merchant assertion checks
+            return " "
 
         draft_text_unquoted = quote_pattern.sub(_strip_if_valid_quote, draft_text)
 

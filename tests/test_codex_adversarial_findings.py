@@ -289,9 +289,33 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         reserved = ledger.reserve_for_export(batch_manifest_id=manifest_id, export_destination=csv_dest)
         self.assertEqual(len(reserved), 1)
 
-        # Write CSV on disk as if worker wrote it with matching batch_manifest_id
-        with open(csv_dest, "w", encoding="utf-8") as f:
-            f.write(f"batch_manifest_id,draft_id,lead_id\n{manifest_id},DRAFT-FAILSAFE-01,LEAD-FAILSAFE-01\n")
+        # Write CSV on disk as if worker wrote it with full valid schema and matching batch_manifest_id
+        fieldnames = [
+            "batch_manifest_id", "draft_id", "lead_id", "customer_name",
+            "contact_channel", "contact_target", "sku", "language", "subject",
+            "body", "reviewed_by", "reviewed_at", "approval_status",
+            "consent_to_contact", "consent_evidence"
+        ]
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerow({
+                "batch_manifest_id": manifest_id,
+                "draft_id": "DRAFT-FAILSAFE-01",
+                "lead_id": "LEAD-FAILSAFE-01",
+                "customer_name": "Failsafe Tester",
+                "contact_channel": "email",
+                "contact_target": "failsafe@example.com",
+                "sku": "SKU-A",
+                "language": "en",
+                "subject": "Ready",
+                "body": "Your item SKU-A is ready.",
+                "reviewed_by": "Admin Reviewer",
+                "reviewed_at": "2026-11-10T00:00:00Z",
+                "approval_status": "APPROVED",
+                "consent_to_contact": "1",
+                "consent_evidence": "Evidence #1100",
+            })
 
         # Now simulate crash recovery:
         rec_stats = engine.recover_interrupted_exports(interrupted_dir)
@@ -728,6 +752,127 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0][1], ApprovalStatus.APPROVED.value)
             self.assertEqual(rows[1][1], ApprovalStatus.APPROVED.value)
+
+    def test_codex_review5_finding1_attributed_assertion_fails_closed(self):
+        """Review 5 Finding 1: Attributed quotation that strips interrogative meaning must return UNCERTAIN."""
+        inquiry_lead = LeadInquiry(
+            lead_id="LEAD-INQ-R5",
+            customer_name="R5 Customer",
+            contact_channel="email",
+            contact_target="r5@example.com",
+            consent_to_contact=True,
+            consent_evidence="Web form opt-in 2026-11-10",
+            preferred_language="en",
+            inquiry_text="Is it true SKU-A contains asbestos?",
+            requested_sku="SKU-A",
+        )
+
+        # 1. Attributed quotation turning question into an affirmative assertion MUST fail closed to UNCERTAIN
+        draft_assertion = 'Regarding your question, "SKU-A contains asbestos". Standard Item A is in stock for 100 SAR.'
+        report_assertion = self.verifier.verify(
+            lead=inquiry_lead,
+            catalog=self.catalog,
+            draft_text=draft_assertion,
+            target_sku="SKU-A",
+        )
+        self.assertEqual(
+            report_assertion.status,
+            VerificationStatus.UNCERTAIN,
+            "Quoting customer question as an affirmative assertion without question mark must be UNCERTAIN.",
+        )
+
+        # 2. Preserving the customer's full question with interrogative mark MUST PASS
+        draft_question = 'Regarding your question, "Is it true SKU-A contains asbestos?", Standard Item A is in stock for 100 SAR.'
+        report_question = self.verifier.verify(
+            lead=inquiry_lead,
+            catalog=self.catalog,
+            draft_text=draft_question,
+            target_sku="SKU-A",
+        )
+        self.assertEqual(
+            report_question.status,
+            VerificationStatus.PASS,
+            "Attributed quotation preserving customer's exact question must PASS.",
+        )
+
+    def test_codex_review5_finding2_recovery_rejects_duplicate_draft_ids_and_incomplete_schema(self):
+        """Review 5 Finding 2: Recovery must reject duplicate draft IDs or incomplete schemas."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        # Create two drafts
+        for did in ["DRAFT-DUP-1", "DRAFT-DUP-2"]:
+            d = DraftMessage(
+                draft_id=did,
+                lead_id=f"LEAD-{did}",
+                customer_name="Dup User",
+                contact_channel="email",
+                contact_target="dup@example.com",
+                sku="SKU-A",
+                language="en",
+                subject="Subj",
+                body="Standard Item A is in stock for 100 SAR.",
+                verification_report=self.verifier.verify(
+                    lead=self.lead_consented,
+                    catalog=self.catalog,
+                    draft_text="Standard Item A is in stock for 100 SAR.",
+                    target_sku="SKU-A",
+                ),
+                consent_to_contact=True,
+                consent_evidence="Evidence #999",
+            )
+            ledger.save_draft(d)
+            ledger.approve(did, reviewer="Admin Reviewer")
+
+        test_dir = os.path.join(self.tmp_dir.name, "dup_batch_dir")
+        os.makedirs(test_dir, exist_ok=True)
+        csv_dest = os.path.join(test_dir, "batch.csv")
+
+        tok = "EXP-DUP-TOK"
+        reserved = ledger.reserve_for_export(batch_manifest_id=tok, export_destination=csv_dest)
+        self.assertEqual(len(reserved), 2)
+
+        # 1. Write CSV with duplicate draft ID DRAFT-DUP-1 twice and missing schema columns
+        with open(csv_dest, "w", encoding="utf-8") as f:
+            f.write(f"batch_manifest_id,draft_id\n{tok},DRAFT-DUP-1\n{tok},DRAFT-DUP-1\n{tok},DRAFT-DUP-2\n")
+
+        rec_stats = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_stats["recovered"]), 0, "Duplicate draft IDs must NOT be recovered.")
+        self.assertEqual(len(rec_stats["released"]), 0, "Ambiguous batch must NOT be released.")
+
+        # 2. Write CSV with complete schema and matching records
+        fieldnames = [
+            "batch_manifest_id", "draft_id", "lead_id", "customer_name",
+            "contact_channel", "contact_target", "sku", "language", "subject",
+            "body", "reviewed_by", "reviewed_at", "approval_status",
+            "consent_to_contact", "consent_evidence"
+        ]
+        with open(csv_dest, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            for did in ["DRAFT-DUP-1", "DRAFT-DUP-2"]:
+                w.writerow({
+                    "batch_manifest_id": tok,
+                    "draft_id": did,
+                    "lead_id": f"LEAD-{did}",
+                    "customer_name": "Dup User",
+                    "contact_channel": "email",
+                    "contact_target": "dup@example.com",
+                    "sku": "SKU-A",
+                    "language": "en",
+                    "subject": "Subj",
+                    "body": "Standard Item A is in stock for 100 SAR.",
+                    "reviewed_by": "Admin Reviewer",
+                    "reviewed_at": "2026-11-10T00:00:00Z",
+                    "approval_status": "APPROVED",
+                    "consent_to_contact": "1",
+                    "consent_evidence": "Evidence #999",
+                })
+
+        # Now recovery must succeed and finalize the batch
+        rec_stats2 = engine.recover_interrupted_exports(test_dir)
+        self.assertEqual(len(rec_stats2["recovered"]), 1)
+        self.assertIn(tok, rec_stats2["recovered"])
 
 
 if __name__ == "__main__":

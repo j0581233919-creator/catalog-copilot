@@ -19,15 +19,34 @@ from .catalog import Catalog
 from .verifier import CommercialClaimVerifier
 
 
+REQUIRED_EXPORT_COLUMNS = (
+    "batch_manifest_id",
+    "draft_id",
+    "lead_id",
+    "customer_name",
+    "contact_channel",
+    "contact_target",
+    "sku",
+    "language",
+    "subject",
+    "body",
+    "reviewed_by",
+    "reviewed_at",
+    "approval_status",
+    "consent_to_contact",
+    "consent_evidence",
+)
+
+
 def _is_proven_published_for_token(
     dest_path: Union[str, Path],
     batch_manifest_id: str,
+    expected_drafts: Optional[List[DraftMessage]] = None,
     expected_draft_ids: Optional[List[str]] = None,
 ) -> bool:
     """Verifies that the file at dest_path is a valid and complete publication belonging to batch_manifest_id.
-    Validates embedded batch identity and verifies all expected draft IDs are present to guard against truncated writes.
-    The CSV file is the primary publication authority; a stale companion manifest does not invalidate
-    a CSV that legitimately contains the complete batch.
+    Validates complete required schema, row-level recipient/content integrity, record count, and rejects duplicates.
+    Optionally matches CSV rows directly against database DraftMessage records.
     """
     if not dest_path or not batch_manifest_id:
         return False
@@ -35,30 +54,68 @@ def _is_proven_published_for_token(
     if not p.is_file() or p.stat().st_size == 0:
         return False
 
-    # Verify CSV content contains matching batch_manifest_id and all expected draft IDs
     try:
         with open(p, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            if not reader.fieldnames or "batch_manifest_id" not in reader.fieldnames:
-                return False
-            if "draft_id" not in reader.fieldnames:
+            fieldnames = set(reader.fieldnames or [])
+            if not set(REQUIRED_EXPORT_COLUMNS).issubset(fieldnames):
                 return False
 
-            found_draft_ids = set()
+            seen_draft_ids = []
+            seen_draft_set = set()
+            rows_by_id = {}
+
             for row in reader:
                 if row.get("batch_manifest_id") != batch_manifest_id:
                     return False
-                did = row.get("draft_id")
-                if did:
-                    found_draft_ids.add(did)
 
-            if not found_draft_ids:
+                did = (row.get("draft_id") or "").strip()
+                if not did or did in seen_draft_set:
+                    # Duplicate or empty draft ID: invalid publication
+                    return False
+                seen_draft_ids.append(did)
+                seen_draft_set.add(did)
+
+                # Validate mandatory dispatch recipient, body, and consent values
+                channel = (row.get("contact_channel") or "").strip()
+                target = (row.get("contact_target") or "").strip()
+                body = (row.get("body") or "").strip()
+                consent_ev = (row.get("consent_evidence") or "").strip()
+                consent_opt = str(row.get("consent_to_contact") or "").strip()
+
+                if not channel or not target or not body or not consent_ev:
+                    return False
+                if consent_opt not in ("1", "True", "true"):
+                    return False
+
+                rows_by_id[did] = row
+
+            if not seen_draft_ids:
                 return False
 
+            # Validate exact unique ID set and record count against expected batch
             if expected_draft_ids is not None:
-                expected_set = set(expected_draft_ids)
-                if found_draft_ids != expected_set:
+                if len(seen_draft_ids) != len(expected_draft_ids):
                     return False
+                if seen_draft_set != set(expected_draft_ids):
+                    return False
+
+            # Validate exact draft contents against database draft records
+            if expected_drafts is not None:
+                if len(seen_draft_ids) != len(expected_drafts):
+                    return False
+                for exp_draft in expected_drafts:
+                    r = rows_by_id.get(exp_draft.draft_id)
+                    if not r:
+                        return False
+                    if r.get("lead_id") != exp_draft.lead_id:
+                        return False
+                    if r.get("contact_target") != exp_draft.contact_target:
+                        return False
+                    if r.get("body") != exp_draft.body:
+                        return False
+                    if r.get("consent_evidence") != exp_draft.consent_evidence:
+                        return False
 
             return True
     except Exception:
@@ -527,7 +584,7 @@ class ApprovalLedger:
                 r_dest = exp["reservation_destination"]
                 t_cursor = conn.execute(
                     """
-                    SELECT draft_id, approval_status FROM drafts
+                    SELECT * FROM drafts
                     WHERE reservation_token = ?
                       AND approval_status IN (?, ?)
                     """,
@@ -535,9 +592,10 @@ class ApprovalLedger:
                 )
                 t_rows = t_cursor.fetchall()
                 batch_ids = [tr["draft_id"] for tr in t_rows]
+                batch_drafts = [self._row_to_draft(tr) for tr in t_rows]
 
                 # If destination file was proven published for this token and all drafts, finalize it!
-                if r_dest and _is_proven_published_for_token(r_dest, r_token, expected_draft_ids=batch_ids):
+                if r_dest and _is_proven_published_for_token(r_dest, r_token, expected_drafts=batch_drafts, expected_draft_ids=batch_ids):
                     for tr in t_rows:
                         d_id = tr["draft_id"]
                         actual_prev = tr["approval_status"]
@@ -611,7 +669,7 @@ class ApprovalLedger:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT draft_id, reservation_destination, approval_status
+                SELECT *
                 FROM drafts
                 WHERE reservation_token = ?
                 """,
@@ -622,10 +680,11 @@ class ApprovalLedger:
                 return 0
 
             draft_ids = [r["draft_id"] for r in rows]
+            draft_objs = [self._row_to_draft(r) for r in rows]
             sample_dest = rows[0]["reservation_destination"]
 
             # Check if destination was proven published on disk for this exact token and draft list
-            if sample_dest and _is_proven_published_for_token(sample_dest, batch_manifest_id, expected_draft_ids=draft_ids):
+            if sample_dest and _is_proven_published_for_token(sample_dest, batch_manifest_id, expected_drafts=draft_objs, expected_draft_ids=draft_ids):
                 # File was published! Do NOT release back to queue! Finalize as EXPORTED!
                 conn.close()
                 return self.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
@@ -728,7 +787,7 @@ class ApprovalLedger:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT draft_id, reservation_token, reservation_destination, reservation_expires_at
+                SELECT *
                 FROM drafts
                 WHERE reservation_token IS NOT NULL
                 """
@@ -758,9 +817,10 @@ class ApprovalLedger:
 
             expires_at = token_rows[0]["reservation_expires_at"]
             draft_ids = [r["draft_id"] for r in token_rows]
+            draft_objs = [self._row_to_draft(r) for r in token_rows]
 
             # Case A: Export CSV was proven published on disk for this token and complete draft batch!
-            if dest_p.is_file() and _is_proven_published_for_token(dest_p, token, expected_draft_ids=draft_ids):
+            if dest_p.is_file() and _is_proven_published_for_token(dest_p, token, expected_drafts=draft_objs, expected_draft_ids=draft_ids):
                 # Reconcile publication: mark exported and ensure manifest matches published CSV
                 manifest_p = dest_p.with_suffix(".manifest.json")
                 manifest_data = {

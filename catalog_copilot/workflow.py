@@ -266,7 +266,7 @@ class BatchWorkflowEngine:
         except Exception:
             # Reconcile publication status before any cleanup or release:
             # Only finalize if THIS worker's CSV publication succeeded and matches token identity!
-            if published_csv and _is_proven_published_for_token(out_p, batch_manifest_id, expected_draft_ids=draft_ids):
+            if published_csv and _is_proven_published_for_token(out_p, batch_manifest_id, expected_drafts=reserved_drafts, expected_draft_ids=draft_ids):
                 if tmp_mf_path and os.path.exists(tmp_mf_path):
                     try:
                         os.replace(tmp_mf_path, manifest_p)
