@@ -144,8 +144,11 @@ class BatchWorkflowEngine:
 
         batch_manifest_id = f"EXP-{uuid.uuid4().hex[:8].upper()}"
 
-        # 1. Atomically reserve drafts under lease
-        reserved_drafts = self.ledger.reserve_for_export(batch_manifest_id=batch_manifest_id)
+        # 1. Atomically reserve drafts under lease bound to destination path
+        reserved_drafts = self.ledger.reserve_for_export(
+            batch_manifest_id=batch_manifest_id,
+            export_destination=str(out_p),
+        )
         if not reserved_drafts:
             return 0
 
@@ -216,12 +219,31 @@ class BatchWorkflowEngine:
                 tmp_mf.flush()
                 os.fsync(tmp_mf.fileno())
 
-            # 4. Atomic file replacement
-            os.replace(tmp_csv_path, out_p)
-            tmp_csv_path = None  # Successfully published
+            # 4. Atomic file publication with no-clobber protection
+            if overwrite:
+                os.replace(tmp_csv_path, out_p)
+                tmp_csv_path = None
+                os.replace(tmp_mf_path, manifest_p)
+                tmp_mf_path = None
+            else:
+                # Atomic hard-link fails with FileExistsError if destination already exists!
+                try:
+                    os.link(tmp_csv_path, out_p)
+                    os.unlink(tmp_csv_path)
+                    tmp_csv_path = None
+                except FileExistsError:
+                    raise FileExistsError(
+                        f"Export destination '{out_p}' already exists. To prevent overwriting active dispatch queues, specify a new path or set overwrite=True."
+                    )
 
-            os.replace(tmp_mf_path, manifest_p)
-            tmp_mf_path = None  # Successfully published
+                try:
+                    os.link(tmp_mf_path, manifest_p)
+                    os.unlink(tmp_mf_path)
+                    tmp_mf_path = None
+                except FileExistsError:
+                    raise FileExistsError(
+                        f"Export manifest '{manifest_p}' already exists. To prevent overwriting active dispatch queues, specify a new path or set overwrite=True."
+                    )
 
             # 5. Commit export status in ledger
             if mark_as_exported:
@@ -230,11 +252,24 @@ class BatchWorkflowEngine:
             return len(reserved_drafts)
 
         except Exception:
-            # Clean up unplaced temp files
-            if tmp_csv_path and os.path.exists(tmp_csv_path):
-                os.remove(tmp_csv_path)
-            if tmp_mf_path and os.path.exists(tmp_mf_path):
-                os.remove(tmp_mf_path)
-            # Release reservation so other workers or future retries can process them
-            self.ledger.release_reservation(batch_manifest_id)
+            # Reconcile publication status before any cleanup or release:
+            # If CSV was published on disk, it is published! Do NOT release reservation!
+            if out_p.exists() and out_p.stat().st_size > 0:
+                if tmp_mf_path and os.path.exists(tmp_mf_path):
+                    try:
+                        if not manifest_p.exists():
+                            os.replace(tmp_mf_path, manifest_p)
+                        else:
+                            os.remove(tmp_mf_path)
+                    except Exception:
+                        pass
+                # Finalize export so messages are never duplicated
+                self.ledger.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
+            else:
+                # CSV was not published: safe to remove temp files and release reservation
+                if tmp_csv_path and os.path.exists(tmp_csv_path):
+                    os.remove(tmp_csv_path)
+                if tmp_mf_path and os.path.exists(tmp_mf_path):
+                    os.remove(tmp_mf_path)
+                self.ledger.release_reservation(batch_manifest_id)
             raise

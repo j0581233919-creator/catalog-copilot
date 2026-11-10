@@ -66,6 +66,47 @@ class CommercialClaimVerifier:
         "here", "welcomed", "confirmed", "out", "in", "متوفر", "غير", "متاح", "سعداء", "جاهز",
     }
 
+    _TRANSACTIONAL_WORDS_EN = {
+        "dear", "hello", "hi", "good", "morning", "afternoon", "evening",
+        "thank", "thanks", "you", "for", "contacting", "us", "inquiring",
+        "about", "your", "interest", "in", "item", "product", "sku",
+        "regarding", "inquiry", "is", "are", "currently", "stock", "out",
+        "of", "inventory", "at", "the", "price", "regular", "with", "an",
+        "active", "discount", "off", "please", "let", "know", "if",
+        "would", "like", "to", "proceed", "order", "or", "have",
+        "additional", "questions", "assist", "alternative", "could",
+        "confirm", "specific", "so", "we", "can", "provide", "exact",
+        "pricing", "and", "details", "best", "regards", "customer",
+        "sales", "team", "support", "valued", "a", "an", "the", "this",
+        "that", "it", "on", "in", "by", "from", "sar", "usd", "aed",
+        "egp", "eur", "gbp", "costs", "available", "unavailable",
+        "ready", "happy", "pleased", "glad", "not", "only", "special",
+        "deal", "request", "help", "here", "as", "be", "been", "was", "were",
+        "our", "these", "those", "will", "shall", "should", "may", "might",
+    }
+
+    _TRANSACTIONAL_WORDS_AR = {
+        "مرحبا", "مرحباً", "عزيزنا", "عزيزي", "عزيزتي", "عميلنا", "العزيز",
+        "نشكركم", "شكر", "شكرا", "شكراً", "الشكر", "على", "تواصلكم", "اهتمام",
+        "اهتمامكم", "واهتمامكم", "منتج", "منتجات", "منتجاتنا", "بمنتجاتنا",
+        "بمنتج", "بخصوص", "استفسار", "استفساركم", "استفساراتكم", "يسعدنا", "الرد",
+        "رمز", "المنتج", "متوفر", "لدينا", "حاليا", "حالياً", "غير", "في",
+        "مستودعات", "مستودعاتنا", "بسعر", "سعر", "السعر", "مع", "خصم",
+        "الأساسي", "إذا", "كنتم", "ترغبون", "تأكيد", "الطلب", "طلب", "أو",
+        "لديكم", "أي", "آخر", "فنحن", "سعداء", "بخدمتكم", "خدمتكم", "يرجى",
+        "إعلامنا", "المساعدة", "مساعدة", "باختيار", "اختيار", "بديل", "تزويدنا",
+        "بدقة", "دقة", "لنتمكن", "نتمكن", "من", "تفاصيل", "وتفاصيل", "التوفر",
+        "توفر", "الرسمية", "أطيب", "التحيات", "تحيات", "تحياتنا", "خالص",
+        "تقدير", "التقدير", "والتقدير", "فريق", "المبيعات", "مبيعات", "خدمة",
+        "العملاء", "والمبيعات", "ريال", "درهم", "جنيه", "دولار", "يورو",
+        "باوند", "هو", "هي", "هذا", "هذه", "ذلك", "تلك", "ما", "هل", "عن",
+        "إلى", "و", "أو", "لا", "نعم", "عرض", "شراء", "السلام", "عليكم",
+        "ورحمة", "الله", "وبركاته", "أهلاً", "اهلا", "وسهلاً", "وسهلا", "تحية", "طيبة",
+        "نود", "إفادتكم", "افادتكم", "بأن", "بان", "المطلوب", "مطلوب", "أسعار",
+        "الأسعار", "بالأسعار", "بالاسعار", "تزويدكم", "أن", "إن", "كان", "كانت",
+        "يكون", "تكون",
+    }
+
     # Normalized currency mapping
     _CURRENCY_NORM = {
         "SAR": "SAR", "ريال": "SAR", "ر.س": "SAR", "ريال سعودي": "SAR",
@@ -259,6 +300,60 @@ class CommercialClaimVerifier:
                         ))
                         reasons.append(f"Ungrounded specification: '{pred_val}' not found in catalog.")
                         overall_status = VerificationStatus.UNCERTAIN
+
+        # Comprehensive vocabulary and assertion grounding check:
+        # Every content word in the draft must be grounded in catalog item data, customer inquiry, or transactional boilerplate.
+        allowed_tokens = set(self._TRANSACTIONAL_WORDS_EN) | set(self._TRANSACTIONAL_WORDS_AR)
+        if catalog_item:
+            catalog_raw = f"{catalog_item.sku} {catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}"
+            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", catalog_raw))
+            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", catalog_raw))
+
+        if lead.customer_name:
+            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.customer_name))
+            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", lead.customer_name))
+
+        if lead.inquiry_text:
+            allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.inquiry_text))
+            allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", lead.inquiry_text))
+
+        sentences = [s.strip() for s in re.split(r"[\n.!?؛\r]+", draft_text) if s.strip()]
+        for sentence in sentences:
+            sentence_clean = sentence.translate(_ARABIC_INDIC_DIGITS)
+            words = re.findall(r"[\w\-]+", sentence_clean)
+            unsupported_words = []
+            for w in words:
+                w_lower = w.lower()
+                # Skip numbers, currencies, and single character punctuation
+                if w.isdigit() or re.match(r"^\d+(?:\.\d+)?$", w):
+                    continue
+                if w_lower in self._CURRENCY_NORM or w.upper() in self._CURRENCY_NORM:
+                    continue
+                if len(w_lower) <= 1:
+                    continue
+
+                w_norm = normalize_arabic_text(w_lower) if re.search(r"[\u0621-\u064A]", w) else w_lower
+                w_variants = {w_lower, w_norm}
+                if re.search(r"[\u0621-\u064A]", w):
+                    # Strip common Arabic prefixes (الـ, و, بـ, لـ, والـ, بالـ, للـ)
+                    for prefix in ("وال", "بال", "لل", "ال", "و", "ب", "ل"):
+                        if w_norm.startswith(prefix) and len(w_norm) > len(prefix) + 1:
+                            w_variants.add(w_norm[len(prefix):])
+
+                if not any(v in allowed_tokens for v in w_variants):
+                    unsupported_words.append(w)
+
+            if unsupported_words:
+                claimed_assertion = " ".join(unsupported_words)
+                checks.append(ClaimVerification(
+                    claim_type=ClaimType.UNGROUNDED_CLAIM,
+                    claimed_value=claimed_assertion,
+                    catalog_value=None,
+                    is_valid=False,
+                    notes=f"Draft asserts ungrounded factual statement or specification ('{claimed_assertion}') in sentence: '{sentence}' not documented in catalog.",
+                ))
+                reasons.append(f"Ungrounded claim in text: '{claimed_assertion}' not verified by catalog.")
+                overall_status = VerificationStatus.UNCERTAIN
 
         # 3. SKU Existence and Text Binding Check
         if sku:

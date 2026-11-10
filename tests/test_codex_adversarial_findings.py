@@ -75,6 +75,22 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         self.assertTrue(len(ungrounded) > 0)
         self.assertTrue(any("waterproof" in c.claimed_value.lower() for c in ungrounded))
 
+    def test_finding_1_arbitrary_unsupported_assertions_fail_closed(self):
+        """Finding 1: 'contains asbestos' and 'weighs 5 kg' must return UNCERTAIN."""
+        for assertion in ["SKU-A contains asbestos.", "SKU-A weighs 5 kg."]:
+            report = self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text=assertion,
+                target_sku="SKU-A",
+            )
+            self.assertEqual(
+                report.status,
+                VerificationStatus.UNCERTAIN,
+                f"Assertion '{assertion}' must return UNCERTAIN.",
+            )
+            self.assertTrue(report.requires_human_intervention)
+
     def test_finding_1_arabic_unsupported_specification_fails_closed(self):
         """Finding 1 (Arabic): 'مقاوم للماء' without catalog support must return UNCERTAIN."""
         arabic_lead = LeadInquiry(
@@ -236,6 +252,105 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         # Attempting to re-export to the same existing path without overwrite must raise FileExistsError
         with self.assertRaises(FileExistsError):
             engine.export_approved_to_csv(out_csv, overwrite=False)
+
+    def test_interrupted_export_never_duplicates_messages(self):
+        """Findings 2 & 3: An interruption after CSV publication must never cause message duplication on retry or recovery."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-FAILSAFE-01",
+            lead_id="LEAD-FAILSAFE-01",
+            customer_name="Failsafe User",
+            contact_channel="email",
+            contact_target="failsafe@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Ready",
+            body="Your item SKU-A is ready.",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Your item SKU-A is in stock.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Evidence #1100",
+        )
+        ledger.save_draft(draft)
+        ledger.approve("DRAFT-FAILSAFE-01", reviewer="Admin Reviewer")
+
+        interrupted_dir = os.path.join(self.tmp_dir.name, "interrupted_dir")
+        os.makedirs(interrupted_dir, exist_ok=True)
+        csv_dest = os.path.join(interrupted_dir, "batch_one.csv")
+
+        # Simulate interruption: manually reserve and publish CSV directly, simulating crash before DB commit
+        manifest_id = "EXP-TEST-CRASH"
+        reserved = ledger.reserve_for_export(batch_manifest_id=manifest_id, export_destination=csv_dest)
+        self.assertEqual(len(reserved), 1)
+
+        # Write CSV on disk as if worker wrote it
+        with open(csv_dest, "w", encoding="utf-8") as f:
+            f.write("draft_id,lead_id\nDRAFT-FAILSAFE-01,LEAD-FAILSAFE-01\n")
+
+        # Now simulate crash recovery:
+        rec_stats = engine.recover_interrupted_exports(interrupted_dir)
+        self.assertIn(manifest_id, rec_stats["recovered"], "Published CSV must be reconciled as recovered.")
+        self.assertEqual(len(rec_stats["released"]), 0, "Published export must not be released back to queue.")
+
+        # Retry to another destination must yield 0 records (no duplicates!)
+        retry_csv = os.path.join(interrupted_dir, "batch_two.csv")
+        retry_count = engine.export_approved_to_csv(retry_csv)
+        self.assertEqual(retry_count, 0, "No drafts should be re-exported after publication interruption.")
+
+    def test_scoped_recovery_protects_other_directories(self):
+        """Finding 3: Recovery in directory A must not disrupt or release reservations in directory B."""
+        ledger = ApprovalLedger(db_path=self.db_path)
+        engine = BatchWorkflowEngine(ledger=ledger)
+
+        draft = DraftMessage(
+            draft_id="DRAFT-DIR-B",
+            lead_id="LEAD-DIR-B",
+            customer_name="Dir B User",
+            contact_channel="email",
+            contact_target="b@example.com",
+            sku="SKU-A",
+            language="en",
+            subject="Ready",
+            body="Your item SKU-A is ready.",
+            verification_report=self.verifier.verify(
+                lead=self.lead_consented,
+                catalog=self.catalog,
+                draft_text="Your item SKU-A is in stock.",
+                target_sku="SKU-A",
+            ),
+            consent_to_contact=True,
+            consent_evidence="Evidence #2200",
+        )
+        ledger.save_draft(draft)
+        ledger.approve("DRAFT-DIR-B", reviewer="Admin Reviewer")
+
+        dir_a = os.path.join(self.tmp_dir.name, "dir_a")
+        dir_b = os.path.join(self.tmp_dir.name, "dir_b")
+        os.makedirs(dir_a, exist_ok=True)
+        os.makedirs(dir_b, exist_ok=True)
+
+        dest_b = os.path.join(dir_b, "export_b.csv")
+        token_b = "EXP-DIR-B-LIVE"
+        reserved = ledger.reserve_for_export(batch_manifest_id=token_b, export_destination=dest_b)
+        self.assertEqual(len(reserved), 1)
+
+        # Recover dir_a: must not touch dir_b's reservation!
+        rec_a = engine.recover_interrupted_exports(dir_a)
+        self.assertEqual(len(rec_a["recovered"]), 0)
+        self.assertEqual(len(rec_a["released"]), 0)
+
+        # Confirm draft in dir_b is still safely reserved under token_b in SQLite
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT reservation_token FROM drafts WHERE draft_id = ?", ("DRAFT-DIR-B",))
+            row = cursor.fetchone()
+            self.assertEqual(row[0], token_b)
 
     def test_finding_5_missing_consent_evidence_fails_closed(self):
         """Finding 5: consent_to_contact=True without consent_evidence must fail verification."""

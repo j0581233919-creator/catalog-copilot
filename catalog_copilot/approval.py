@@ -69,6 +69,8 @@ class ApprovalLedger:
                 conn.execute("ALTER TABLE drafts ADD COLUMN reservation_token TEXT")
             if "reservation_expires_at" not in existing_columns:
                 conn.execute("ALTER TABLE drafts ADD COLUMN reservation_expires_at TEXT")
+            if "reservation_destination" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN reservation_destination TEXT")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -445,26 +447,67 @@ class ApprovalLedger:
             )
             return [self._row_to_draft(row) for row in cursor.fetchall()]
 
-    def reserve_for_export(self, batch_manifest_id: str, lease_seconds: int = 300) -> List[DraftMessage]:
-        """Atomically reserves approved, unexported drafts under a lease token.
+    def reserve_for_export(
+        self,
+        batch_manifest_id: str,
+        export_destination: str,
+        lease_seconds: int = 300,
+    ) -> List[DraftMessage]:
+        """Atomically reserves approved, unexported drafts under a lease token bound to an export destination.
         Protects against concurrent export workers and prevents duplicate exports on crash.
         """
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
         lease_expiry_iso = (now + timedelta(seconds=lease_seconds)).isoformat()
+        dest_str = str(Path(export_destination).resolve())
 
         with self._get_connection() as conn:
-            # 1. Release expired reservations from dead/crashed processes
-            conn.execute(
+            # 1. Reconcile expired reservations before taking new ones
+            cursor = conn.execute(
                 """
-                UPDATE drafts
-                SET reservation_token = NULL, reservation_expires_at = NULL
+                SELECT draft_id, reservation_token, reservation_destination
+                FROM drafts
                 WHERE reservation_token IS NOT NULL
                   AND reservation_expires_at < ?
                   AND approval_status IN (?, ?)
                 """,
                 (now_iso, ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value),
             )
+            expired_rows = cursor.fetchall()
+            for row in expired_rows:
+                r_dest = row["reservation_destination"]
+                r_token = row["reservation_token"]
+                d_id = row["draft_id"]
+                # If destination file was actually published before expiration, finalize it!
+                if r_dest and os.path.exists(r_dest) and os.path.getsize(r_dest) > 0:
+                    conn.execute(
+                        """
+                        UPDATE drafts
+                        SET approval_status = ?, is_dispatched = 0,
+                            reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
+                        WHERE draft_id = ? AND reservation_token = ?
+                        """,
+                        (ApprovalStatus.EXPORTED.value, d_id, r_token),
+                    )
+                    self._log_audit_event(
+                        conn=conn,
+                        draft_id=d_id,
+                        action="EXPORTED",
+                        actor="System/LeaseReconciliation",
+                        previous_status=ApprovalStatus.APPROVED.value,
+                        new_status="EXPORTED",
+                        details={"reconciled_destination": r_dest, "batch_manifest_id": r_token},
+                    )
+                else:
+                    # Not published: safe to release back to queue
+                    conn.execute(
+                        """
+                        UPDATE drafts
+                        SET reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
+                        WHERE draft_id = ? AND reservation_token = ?
+                        """,
+                        (d_id, r_token),
+                    )
 
             # 2. Select eligible drafts for reservation
             cursor = conn.execute(
@@ -488,22 +531,45 @@ class ApprovalLedger:
             conn.execute(
                 f"""
                 UPDATE drafts
-                SET reservation_token = ?, reservation_expires_at = ?
+                SET reservation_token = ?, reservation_destination = ?, reservation_expires_at = ?
                 WHERE draft_id IN ({placeholders})
                 """,
-                [batch_manifest_id, lease_expiry_iso] + draft_ids,
+                [batch_manifest_id, dest_str, lease_expiry_iso] + draft_ids,
             )
             conn.commit()
 
             return [self._row_to_draft(row) for row in rows]
 
     def release_reservation(self, batch_manifest_id: str) -> int:
-        """Releases an active reservation token back to the queue (e.g. upon export failure)."""
+        """Releases an active reservation token back to the queue ONLY if the export file was not published.
+        If the export file was actually published on disk, it is finalized instead to prevent duplicates.
+        """
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
+                SELECT draft_id, reservation_destination, approval_status
+                FROM drafts
+                WHERE reservation_token = ?
+                """,
+                (batch_manifest_id,),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return 0
+
+            # Check if any row's destination was published on disk
+            sample_dest = rows[0]["reservation_destination"]
+            if sample_dest and os.path.exists(sample_dest) and os.path.getsize(sample_dest) > 0:
+                # File was published! Do NOT release back to queue! Finalize as EXPORTED!
+                draft_ids = [r["draft_id"] for r in rows]
+                conn.close()
+                return self.mark_exported(draft_ids=draft_ids, batch_manifest_id=batch_manifest_id)
+
+            # Not published: safe to release
+            cursor = conn.execute(
+                """
                 UPDATE drafts
-                SET reservation_token = NULL, reservation_expires_at = NULL
+                SET reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
                 WHERE reservation_token = ?
                 """,
                 (batch_manifest_id,),
@@ -513,7 +579,9 @@ class ApprovalLedger:
             return count
 
     def mark_exported(self, draft_ids: List[str], batch_manifest_id: str) -> int:
-        """Atomically transitions reserved drafts to EXPORTED and clears reservation tokens."""
+        """Atomically transitions reserved drafts to EXPORTED and clears reservation tokens.
+        Enforces strict token ownership: cannot finalize another worker's reservation.
+        """
         if not draft_ids:
             return 0
 
@@ -523,7 +591,11 @@ class ApprovalLedger:
         with self._get_connection() as conn:
             for draft_id in draft_ids:
                 cursor = conn.execute(
-                    "SELECT approval_status, reservation_token FROM drafts WHERE draft_id = ?",
+                    """
+                    SELECT approval_status, reservation_token, reservation_destination
+                    FROM drafts
+                    WHERE draft_id = ?
+                    """,
                     (draft_id,),
                 )
                 row = cursor.fetchone()
@@ -531,6 +603,12 @@ class ApprovalLedger:
                     continue
 
                 prev_status = row["approval_status"]
+                current_token = row["reservation_token"]
+
+                # Enforce token ownership: cannot finalize another worker's active reservation
+                if current_token is not None and current_token != batch_manifest_id:
+                    continue
+
                 if prev_status not in (ApprovalStatus.APPROVED.value, ApprovalStatus.EDITED_AND_APPROVED.value):
                     continue
 
@@ -538,7 +616,7 @@ class ApprovalLedger:
                     """
                     UPDATE drafts
                     SET approval_status = ?, is_dispatched = 0,
-                        reservation_token = NULL, reservation_expires_at = NULL
+                        reservation_token = NULL, reservation_destination = NULL, reservation_expires_at = NULL
                     WHERE draft_id = ?
                     """,
                     (ApprovalStatus.EXPORTED.value, draft_id),
@@ -558,50 +636,81 @@ class ApprovalLedger:
         return updated_count
 
     def recover_interrupted_exports(self, export_dir: Union[str, Path]) -> Dict[str, Any]:
-        """Scans export directory and recovers or clears orphaned reservations."""
+        """Scans export directory and reconciles reservations scoped to that directory.
+        Never releases live active reservations or reservations belonging to other directories.
+        """
         export_path = Path(export_dir).resolve()
+        now_iso = datetime.now(timezone.utc).isoformat()
         recovered = []
         released = []
 
         if not export_path.exists():
             return {"recovered": recovered, "released": released}
 
-        manifest_files = list(export_path.glob("*.manifest.json"))
-        manifest_map: Dict[str, tuple[Path, Dict[str, Any]]] = {}
-        for mf in manifest_files:
-            try:
-                with open(mf, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    b_id = data.get("batch_manifest_id")
-                    if b_id:
-                        manifest_map[b_id] = (mf, data)
-            except Exception:
-                continue
-
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT DISTINCT reservation_token FROM drafts
+                SELECT draft_id, reservation_token, reservation_destination, reservation_expires_at
+                FROM drafts
                 WHERE reservation_token IS NOT NULL
                 """
             )
-            active_tokens = [row["reservation_token"] for row in cursor.fetchall()]
+            rows = cursor.fetchall()
 
-        for token in active_tokens:
-            if token in manifest_map:
-                mf_path, mf_data = manifest_map[token]
-                csv_filename = mf_data.get("export_file")
-                csv_path = export_path / csv_filename if csv_filename else None
-                if csv_path and csv_path.exists() and csv_path.stat().st_size > 0:
-                    draft_ids = mf_data.get("draft_ids", [])
-                    self.mark_exported(draft_ids, token)
-                    recovered.append(token)
-                else:
+        # Group by reservation_token
+        tokens_map: Dict[str, list] = {}
+        for r in rows:
+            tok = r["reservation_token"]
+            if tok not in tokens_map:
+                tokens_map[tok] = []
+            tokens_map[tok].append(r)
+
+        for token, token_rows in tokens_map.items():
+            dest_str = token_rows[0]["reservation_destination"]
+            if not dest_str:
+                continue
+
+            dest_p = Path(dest_str).resolve()
+            # STRICT DIRECTORY SCOPING: Only touch reservations scoped inside export_path!
+            try:
+                dest_p.relative_to(export_path)
+            except ValueError:
+                # Reservation is for a different directory: leave completely untouched!
+                continue
+
+            expires_at = token_rows[0]["reservation_expires_at"]
+            draft_ids = [r["draft_id"] for r in token_rows]
+
+            # Case A: Export CSV was published on disk!
+            if dest_p.exists() and dest_p.stat().st_size > 0:
+                # Reconcile publication: mark exported and ensure manifest exists
+                manifest_p = dest_p.with_suffix(".manifest.json")
+                if not manifest_p.exists():
+                    manifest_data = {
+                        "batch_manifest_id": token,
+                        "export_file": dest_p.name,
+                        "record_count": len(draft_ids),
+                        "draft_ids": draft_ids,
+                        "exported_at": now_iso,
+                        "reconciled_by": "System/CrashRecovery",
+                    }
+                    try:
+                        with open(manifest_p, "w", encoding="utf-8") as mf:
+                            json.dump(manifest_data, mf, indent=2, ensure_ascii=False)
+                    except Exception:
+                        pass
+                self.mark_exported(draft_ids=draft_ids, batch_manifest_id=token)
+                recovered.append(token)
+
+            # Case B: Export CSV does NOT exist on disk:
+            else:
+                # Only release if lease is expired! If lease is still live, another worker is actively writing!
+                if expires_at and expires_at < now_iso:
                     self.release_reservation(token)
                     released.append(token)
-            else:
-                self.release_reservation(token)
-                released.append(token)
+                else:
+                    # Still live active lease: do not disrupt!
+                    pass
 
         return {"recovered": recovered, "released": released}
 
