@@ -135,11 +135,12 @@ class CommercialClaimVerifier:
 
     _CLAUSAL_CONNECTIVES_EN = re.compile(
         r"\b(?:"
-        r"and|but|yet|so|or|"
+        r"and|but|yet|so|or|plus|besides|"
+        r"as|since|because|"
         r"although|though|even\s+though|even\s+if|"
-        r"since|because|given\s+that|knowing\s+that|considering\s+that|assuming\s+that|"
-        r"while|whereas|despite|in\s+spite\s+of|seeing\s+that|inasmuch\s+as|provided\s+that|"
-        r"as\s+well\s+as|in\s+addition\s+to|besides|plus"
+        r"given(?:\s+that)?|considering(?:\s+that)?|assuming(?:\s+that)?|knowing(?:\s+that)?|supposing(?:\s+that)?|provided(?:\s+that)?|"
+        r"while|whereas|despite|in\s+spite\s+of|seeing\s+that|inasmuch\s+as|"
+        r"as\s+well\s+as|in\s+addition\s+to|unless"
         r")\b",
         re.IGNORECASE,
     )
@@ -167,8 +168,8 @@ class CommercialClaimVerifier:
         if re.search(r"[\.!\;؛:?\n\r,،/\\|~^]", body):
             return False
 
-        # Must not contain dash or em-dash clause boundaries (e.g. ' - ' or '--')
-        if re.search(r"\s+[-—–]+\s+|--", body):
+        # Must not contain dash or em-dash boundaries (em-dash, en-dash, double dash, or hyphen with whitespace)
+        if re.search(r"[—–]|--|(?:\s-)|(?:-\s)", body):
             return False
 
         # Must not contain clausal connectives that introduce subordinate or coordinate assertion clauses
@@ -185,10 +186,10 @@ class CommercialClaimVerifier:
         """Extracts genuine, isolated interrogative question clauses from customer text."""
         valid_clauses = []
         pattern = (
-            r"(?:^|[\.!\;؛:\n\r,،/\\|~^]|\s+[-—–]+\s+|--"
-            r"|\b(?:and|but|yet|so|or|although|though|even\s+though|since|because|while|whereas)\b"
+            r"(?:^|[\.!\;؛:\n\r,،/\\|~^—–]|--|(?:\s-)|(?:-\s)"
+            r"|\b(?:and|but|yet|so|or|plus|besides|as|since|because|although|though|even\s+though|given|while|whereas)\b"
             r"|\b(?:مع\s+أن|رغم\s+أن|بما\s+أن|حيث\s+أن|لأن|لكن|ولكن)\b|\s+(?:و|أو|لكن)\s+)"
-            r"\s*([^.!?؛;:\n\r,،/\\|~^]+?[\?؟])"
+            r"\s*([^.!?؛;:\n\r,،/\\|~^—–]+?[\?؟])"
         )
         for match in re.finditer(pattern, text, re.IGNORECASE):
             candidate = match.group(1).strip()

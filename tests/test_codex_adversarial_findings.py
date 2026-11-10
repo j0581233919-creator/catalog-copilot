@@ -1000,6 +1000,11 @@ class TestCodexAdversarialFindings(unittest.TestCase):
             'Is it available although SKU-A contains asbestos?',
             'Can you confirm availability since SKU-A contains asbestos?',
             'Is it available / SKU-A contains asbestos?',
+            'Is it available as SKU-A contains asbestos?',
+            'Is it available—SKU-A contains asbestos?',
+            'Is it available -SKU-A contains asbestos?',
+            'Is it available given SKU-A contains asbestos?',
+            'هل هو متوفر لأن المنتج يحتوي أسبستوس؟',
             'هل هو متوفر مع أن المنتج يحتوي أسبستوس؟',
         ]:
             l_mix = replace(lead_mixed, inquiry_text=mixed_q)
