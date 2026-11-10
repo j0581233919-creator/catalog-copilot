@@ -134,8 +134,8 @@ class CommercialClaimVerifier:
     )
 
     _TRUTH_EVALUATING_STARTERS = [
-        re.compile(r"^(?:is\s+it\s+(?:true|correct|accurate)(?:\s+that)?|can\s+you\s+confirm\s+(?:if|whether))\b", re.IGNORECASE),
-        re.compile(r"^(?:هل\s+صحيح\s+أن|هل\s+من\s+الصحيح\s+أن)\b"),
+        re.compile(r"^(?:is\s+it\s+(?:true|correct|accurate)(?:\s+that)?|can\s+you\s+confirm\s+(?:if|whether))\s+", re.IGNORECASE),
+        re.compile(r"^(?:هل\s+صحيح\s+أن|هل\s+من\s+الصحيح\s+أن)\s+"),
     ]
 
     _INQUIRY_TRANSACTIONAL_WORDS_EN = {
@@ -170,22 +170,158 @@ class CommercialClaimVerifier:
 
     _CLAUSAL_CONNECTIVES_EN = re.compile(
         r"\b(?:"
-        r"and|but|yet|so|or|plus|besides|"
-        r"as|since|because|for|"
-        r"although|though|even\s+though|even\s+if|"
-        r"given(?:\s+that)?|considering(?:\s+that)?|assuming(?:\s+that)?|knowing(?:\s+that)?|supposing(?:\s+that)?|provided(?:\s+that)?|"
-        r"while|whilst|when|whenever|whether|whereas|despite|in\s+spite\s+of|seeing\s+that|inasmuch\s+as|"
-        r"as\s+well\s+as|in\s+addition\s+to|unless|lest|where|wherever"
+        r"and|but|yet|so|or|nor|plus|besides|"
+        r"if|unless|provided(?:\s+that)?|supposing(?:\s+that)?|assuming(?:\s+that)?|in\s+case|"
+        r"after|before|when|whenever|while|whilst|since|until|till|once|as\s+soon\s+as|"
+        r"because|as|for|inasmuch\s+as|so\s+that|in\s+order\s+that|"
+        r"although|though|even\s+though|even\s+if|whereas|despite|in\s+spite\s+of|notwithstanding|"
+        r"given(?:\s+that)?|considering(?:\s+that)?|knowing(?:\s+that)?|seeing\s+that|"
+        r"as\s+well\s+as|in\s+addition\s+to|lest|where|wherever|whether|who|whom|whose|which|that"
         r")\b",
         re.IGNORECASE,
     )
 
     _CLAUSAL_CONNECTIVES_AR = re.compile(
         r"\b(?:"
-        r"مع\s+أن|رغم\s+أن|بالرغم\s+من|بما\s+أن|حيث\s+أن|لأن|إذ\s+أن|طالما\s+أن|"
-        r"لكن|ولكن|بينما|غير\s+أن|علماً\s+أن|مع\s+العلم\s+أن|بالإضافة\s+إلى"
-        r")\b|\s+(?:و|أو|لكن)\s+",
+        r"إذا|اذا|لو|إن|ان|لولا|طالما|"
+        r"بعد|بعدما|بعد\s+أن|قبل|قبلما|قبل\s+أن|حين|حينما|عند|عندما|وقت|وقتما|منذ|حتى|إلى\s+أن|الى\s+أن|"
+        r"لأن|لان|بسبب|كون|لكون|نظرا|نظراً|نظرا\s+لأن|نظراً\s+لأن|حيث|حيث\s+أن|حيثما|إذ|اذ|إذ\s+أن|اذ\s+أن|"
+        r"مع\s+أن|مع\s+ان|رغم|رغم\s+أن|رغم\s+ان|بالرغم\s+من|غير\s+أن|غير\s+ان|إلا\s+أن|الا\s+أن|"
+        r"لكن|ولكن|بيد\s+أن|بينما|علماً\s+أن|علما\s+أن|مع\s+العلم\s+أن|بالإضافة\s+إلى|بالاضافة\s+الى|"
+        r"ثم|أم|ام|بل|الذي|التي|الذين|اللواتي|اللاتي"
+        r")\b|\s+(?:و|أو|او|ثم|أم|ام|بل|لكن)\s+",
     )
+
+    _SECONDARY_VERBS_EN = re.compile(
+        r"\b(?:"
+        r"is|are|was|were|am|be|been|being|"
+        r"have|has|had|having|"
+        r"do|does|did|"
+        r"can|could|will|would|shall|should|may|might|must|"
+        r"become|becomes|became|becoming|"
+        r"contain|contains|contained|containing|"
+        r"cause|causes|caused|causing|"
+        r"emit|emits|emitted|emitting|"
+        r"include|includes|included|including|"
+        r"make|makes|made|making|"
+        r"cost|costs|costing"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_valid_truth_evaluating_complement(cls, body: str, allowed_tokens: Optional[Set[str]] = None) -> bool:
+        """Validates that a truth-evaluating inquiry consists strictly of a single, unadorned
+        complement proposition regarding the catalog product, without conditional, temporal,
+        causal, or coordinate secondary assertion clauses.
+        """
+        # Match English starter
+        m_en = cls._TRUTH_EVALUATING_STARTERS[0].match(body)
+        if m_en:
+            comp = body[m_en.end():].strip()
+            # Must not contain delimiters, dashes, or clausal connectives
+            if re.search(r"[\.!\;؛:?\n\r,،/\\|~^—–&＆@#$%\*]", comp) or re.search(r"[—–]|--|(?:\s-)|(?:-\s)", comp):
+                return False
+            if cls._CLAUSAL_CONNECTIVES_EN.search(comp):
+                return False
+
+            # Must anchor to target product subject:
+            subj_m = re.match(
+                r"^(?:(?:the|this|our)\s+)?(?:sku[-_ ]?[a-z0-9]+|product|item|model|unit|device|it|this)\b",
+                comp,
+                re.IGNORECASE,
+            )
+            sku_m = None
+            if not subj_m and allowed_tokens:
+                for tok in allowed_tokens:
+                    if tok and re.match(r"^" + re.escape(tok) + r"\b", comp, re.IGNORECASE):
+                        sku_m = tok
+                        break
+            if not subj_m and not sku_m:
+                return False
+
+            subj_len = len(comp[: subj_m.end() if subj_m else len(sku_m)])
+            rest = comp[subj_len:].strip()
+
+            # Rest must begin with exactly ONE verb phrase
+            verb_m = re.match(
+                r"^(?:(?:is|are|was|were)\s+(?:not\s+)?(?:made\s+(?:of|with|from)\s+|composed\s+of\s+|built\s+with\s+)?|"
+                r"(?:contains?|has|have|includes?|comes\s+with|uses?|emits?|causes?)\s+(?:not\s+)?)\b",
+                rest,
+                re.IGNORECASE,
+            )
+            if not verb_m:
+                return False
+
+            # After the single verb phrase, we have the claim noun phrase
+            claim_phrase = rest[verb_m.end():].strip()
+            if not claim_phrase:
+                return False
+
+            # Claim phrase must NOT contain any secondary verbs
+            if cls._SECONDARY_VERBS_EN.search(claim_phrase):
+                return False
+
+            # Claim phrase must be concise (at most 4 words)
+            words = claim_phrase.split()
+            if len(words) > 4:
+                return False
+
+            return True
+
+        # Match Arabic starter
+        m_ar = cls._TRUTH_EVALUATING_STARTERS[1].match(body)
+        if m_ar:
+            comp = body[m_ar.end():].strip()
+            # Must not contain delimiters, dashes, or clausal connectives
+            if re.search(r"[\.!\;؛:?\n\r,،/\\|~^—–&＆@#$%\*]", comp) or re.search(r"[—–]|--|(?:\s-)|(?:-\s)", comp):
+                return False
+            if cls._CLAUSAL_CONNECTIVES_AR.search(comp):
+                return False
+
+            # Watch out for proclitic "و" attached to words (e.g. والمنتج, وسام)
+            if re.search(r"(?:^|\s)و(?:إذا|اذا|لو|إن|ان|بعد|قبل|حين|عند|المنتج|الصنف|السلعة|هو|هي|هذا|هذه|[^\s]{2,})\b", comp):
+                return False
+
+            subj_pattern = r"(?:sku[-_ ]?[a-z0-9]+|المنتج|الصنف|السلعة|هو|هي|هذا|هذه|البضاعة)"
+            pred_pattern = r"(?:يحتوي|تحتوي|يحوي|تحوي|يشمل|تشمل|به|بها|فيه|فيها|مصنوع\s+من|مصنوعة\s+من|أصلي|غير\s+أصلي|مقلد|سام|مغشوش|ضار|مسرطن)"
+
+            # Check SVO
+            svo_m = re.match(r"^(" + subj_pattern + r")\s+(" + pred_pattern + r")(?:\s+(.+))?$", comp, re.IGNORECASE)
+            # Check VSO
+            vso_m = re.match(r"^(" + pred_pattern + r")\s+(" + subj_pattern + r")(?:\s+(.+))?$", comp, re.IGNORECASE)
+
+            # Also check if allowed_tokens has Arabic names
+            allowed_subj_m = None
+            if not svo_m and not vso_m and allowed_tokens:
+                for tok in allowed_tokens:
+                    if tok and re.match(r"^" + re.escape(tok) + r"\b", comp, re.IGNORECASE):
+                        allowed_subj_m = tok
+                        break
+                if allowed_subj_m:
+                    rest_ar = comp[len(allowed_subj_m):].strip()
+                    svo_m = re.match(r"^(" + pred_pattern + r")(?:\s+(.+))?$", rest_ar, re.IGNORECASE)
+
+            if not svo_m and not vso_m:
+                return False
+
+            claim_part = (svo_m.group(3) if (svo_m and svo_m.lastindex and svo_m.lastindex >= 3)
+                          else (vso_m.group(3) if (vso_m and vso_m.lastindex and vso_m.lastindex >= 3)
+                                else (svo_m.group(2) if (allowed_subj_m and svo_m and svo_m.lastindex and svo_m.lastindex >= 2) else None)))
+            if claim_part:
+                claim_part = claim_part.strip()
+                # Claim part must not contain another predicate
+                if re.search(pred_pattern, claim_part):
+                    return False
+                # Nor any auxiliary/copula verbs
+                if re.search(r"\b(?:كان|كانت|يكون|تكون|أصبح|اصبح|أصبحت|اصبحت|صار|صارت|يوجد|توجد)\b", claim_part):
+                    return False
+                if len(claim_part.split()) > 4:
+                    return False
+
+            return True
+
+        return False
 
     @classmethod
     def _is_pure_interrogative_clause(cls, text: str, allowed_tokens: Optional[Set[str]] = None) -> bool:
@@ -207,14 +343,14 @@ class CommercialClaimVerifier:
         if re.search(r"[—–]|--|(?:\s-)|(?:-\s)", body):
             return False
 
-        # Must not contain clausal connectives that introduce subordinate or coordinate assertion clauses
-        if cls._CLAUSAL_CONNECTIVES_EN.search(body) or cls._CLAUSAL_CONNECTIVES_AR.search(body):
-            return False
-
         # Case A: Explicit truth-evaluating inquiry question (e.g. 'Is it true that SKU-A contains asbestos?')
         is_truth_evaluating = any(p.search(body) for p in cls._TRUTH_EVALUATING_STARTERS)
         if is_truth_evaluating:
-            return True
+            return cls._is_valid_truth_evaluating_complement(body, allowed_tokens=allowed_tokens)
+
+        # Must not contain clausal connectives that introduce subordinate or coordinate assertion clauses
+        if cls._CLAUSAL_CONNECTIVES_EN.search(body) or cls._CLAUSAL_CONNECTIVES_AR.search(body):
+            return False
 
         # Case B: Standard product inquiry question (e.g. 'Is it available?', 'Is SKU-A in stock?')
         is_en = bool(cls._INTERROGATIVE_STARTERS_EN.match(body))

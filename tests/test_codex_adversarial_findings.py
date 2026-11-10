@@ -1123,6 +1123,56 @@ class TestCodexAdversarialFindings(unittest.TestCase):
         self.assertEqual(len(rec_valid["recovered"]), 1)
         self.assertIn(tok, rec_valid["recovered"])
 
+    def test_codex_review10_truth_evaluating_questions_must_not_conceal_ungrounded_assertions(self):
+        """Review 10 Finding: Truth-evaluating questions must fail-closed as UNCERTAIN if they contain secondary clauses,
+        conditionals, temporal connectives, or coordinate assertions; pure inquiries must return PASS."""
+        from dataclasses import replace
+
+        adversarial_probes = [
+            'Is it true SKU-A contains asbestos if SKU-A is toxic?',
+            'Is it true SKU-A contains asbestos after SKU-A became toxic?',
+            'Is it true SKU-A contains asbestos because SKU-A is toxic?',
+            'Is it true SKU-A contains asbestos although SKU-A is toxic?',
+            'Is it true SKU-A contains asbestos ＆ SKU-A is toxic?',
+            'Is it true SKU-A contains asbestos and SKU-A is toxic?',
+            'هل صحيح أن SKU-A يحتوي اسبستوس إذا المنتج سام؟',
+            'هل صحيح أن SKU-A يحتوي اسبستوس والمنتج سام؟',
+            'هل صحيح أن SKU-A يحتوي اسبستوس بعد أن أصبح ساماً؟',
+            'Is it true SKU-A contains asbestos? SKU-A is toxic?',
+        ]
+
+        for probe in adversarial_probes:
+            lead = replace(self.lead_consented, inquiry_text=probe)
+            draft = f'Regarding your question, "{probe}", Standard Item A is in stock for 100 SAR.'
+            report = self.verifier.verify(lead=lead, catalog=self.catalog, draft_text=draft, target_sku="SKU-A")
+            self.assertEqual(
+                report.status,
+                VerificationStatus.UNCERTAIN,
+                f"Adversarial probe '{probe}' must fail closed as UNCERTAIN.",
+            )
+
+        pure_probes = [
+            'Is it available?',
+            'What is the price of SKU-A?',
+            'Is it true SKU-A contains asbestos?',
+            'Is it true that the product contains asbestos?',
+            'Can you confirm whether SKU-A is waterproof?',
+            'هل الصنف متوفر؟',
+            'هل صحيح أن SKU-A يحتوي اسبستوس؟',
+            'هل صحيح أن المنتج سام؟',
+            'هل صحيح أن SKU-A غير أصلي؟',
+        ]
+
+        for probe in pure_probes:
+            lead = replace(self.lead_consented, inquiry_text=probe)
+            draft = f'Regarding your question, "{probe}", Standard Item A is in stock for 100 SAR.'
+            report = self.verifier.verify(lead=lead, catalog=self.catalog, draft_text=draft, target_sku="SKU-A")
+            self.assertEqual(
+                report.status,
+                VerificationStatus.PASS,
+                f"Pure inquiry '{probe}' must PASS.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
