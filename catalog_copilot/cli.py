@@ -14,6 +14,7 @@ from .approval import ApprovalLedger
 from .workflow import BatchWorkflowEngine
 from .tui import HumanReviewTUI
 from .chatwoot import ChatwootApiClient, ChatwootWebhookHandler, create_chatwoot_server
+from .audit import AuditExporter, verify_audit_export
 
 
 def cmd_validate_catalog(args: argparse.Namespace) -> int:
@@ -197,6 +198,76 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 0
     except Exception as e:
         print(f"Export error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_export_audit(args: argparse.Namespace) -> int:
+    try:
+        ledger = ApprovalLedger(db_path=args.db)
+        exporter = AuditExporter(ledger=ledger)
+        status_map = {
+            "all": None,
+            "approved": ApprovalStatus.APPROVED,
+            "rejected": ApprovalStatus.REJECTED,
+            "pending": ApprovalStatus.PENDING_REVIEW,
+        }
+        status_filter = status_map.get(args.status.lower(), None)
+        out_p, receipt_p, receipt = exporter.export_audit_trail(
+            output_path=args.output,
+            export_format=args.format,
+            status_filter=status_filter,
+            exported_by=getattr(args, "reviewer", "Administrator") or "Administrator",
+            overwrite=args.overwrite,
+        )
+        print("=" * 72)
+        print(" CATALOGCOPILOT AUDIT EXPORT SUCCESSFUL")
+        print("=" * 72)
+        print(f"Batch ID:         {receipt.batch_id}")
+        print(f"Export Payload:   {out_p}")
+        print(f"Audit Receipt:    {receipt_p}")
+        print(f"Records Exported: {receipt.record_count}")
+        print(f"File SHA-256:     {receipt.file_sha256}")
+        print(f"Records Chain:    {receipt.records_sha256_chain}")
+        print(f"Audit Events:     {receipt.audit_events_count} (Digest: {receipt.audit_events_sha256[:16]}...)")
+        print(f"Exported At:      {receipt.exported_at}")
+        print("-" * 72)
+        print("Notice: Cryptographic receipt proves local bit-level match against SQLite audit log.")
+        return 0
+    except Exception as e:
+        print(f"Audit export error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_verify_audit(args: argparse.Namespace) -> int:
+    try:
+        result = verify_audit_export(
+            export_file_path=args.file,
+            receipt_file_path=getattr(args, "receipt", None),
+            db_path=getattr(args, "db", None),
+        )
+        print("=" * 72)
+        print(" CATALOGCOPILOT AUDIT VERIFICATION REPORT")
+        print("=" * 72)
+        if result.is_valid:
+            print("VERIFICATION RESULT: [PASS] VALID & TAMPER-EVIDENT")
+            print(f"  Target File:       {result.details.get('file_path')}")
+            print(f"  Receipt File:      {result.details.get('receipt_path')}")
+            print(f"  Batch ID:          {result.details.get('batch_id')}")
+            print(f"  File SHA-256:      {result.details.get('actual_file_sha256')}")
+            print(f"  Record Count:      {result.details.get('actual_record_count')}")
+            print(f"  Record Hash Chain: {result.details.get('actual_records_chain')}")
+            if "db_events_sha256" in result.details:
+                print(f"  SQLite Audit Log:  {result.details.get('db_events_count')} events verified matching receipt")
+            print("-" * 72)
+            print("Audit file and receipt verified authentic and unchanged.")
+            return 0
+        else:
+            print("VERIFICATION RESULT: [FAIL] TAMPERING OR CORRUPTION DETECTED", file=sys.stderr)
+            for err in result.errors:
+                print(f"  • {err}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"Verification error: {e}", file=sys.stderr)
         return 1
 
 
@@ -396,6 +467,23 @@ def main() -> None:
     p_exp.add_argument("--no-dispatch", action="store_true", help="Do not mark exported items as dispatched")
     p_exp.add_argument("--overwrite", action="store_true", help="Overwrite destination CSV if it already exists")
     p_exp.set_defaults(func=cmd_export)
+
+    # export-audit
+    p_audit_exp = subparsers.add_parser("export-audit", help="Export tamper-evident audit trail with cryptographic receipt")
+    p_audit_exp.add_argument("--db", "-d", default="catalog_copilot.db", help="Path to SQLite queue DB")
+    p_audit_exp.add_argument("--output", "-o", default="audit_export.csv", help="Output audit file path")
+    p_audit_exp.add_argument("--format", "-f", default="csv", choices=["csv", "json"], help="Export format (csv/json)")
+    p_audit_exp.add_argument("--status", "-s", default="all", choices=["all", "approved", "rejected", "pending"], help="Filter drafts by approval status")
+    p_audit_exp.add_argument("--reviewer", "-r", default="Administrator", help="Reviewer or operator identity")
+    p_audit_exp.add_argument("--overwrite", action="store_true", help="Overwrite destination if it already exists")
+    p_audit_exp.set_defaults(func=cmd_export_audit)
+
+    # verify-audit
+    p_audit_ver = subparsers.add_parser("verify-audit", help="Verify export file integrity against receipt and database")
+    p_audit_ver.add_argument("--file", "-f", required=True, help="Path to exported CSV or JSON file")
+    p_audit_ver.add_argument("--receipt", "-r", help="Path to .receipt.json file (optional if named standardly)")
+    p_audit_ver.add_argument("--db", "-d", help="Optional path to SQLite queue DB for full database cross-referencing")
+    p_audit_ver.set_defaults(func=cmd_verify_audit)
 
     # demo
     p_demo = subparsers.add_parser("demo", help="Run interactive verification demonstration")

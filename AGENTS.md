@@ -21,18 +21,38 @@ CatalogCopilot is a catalog-grounded sales assistant for Arabic and English cust
 `READY` -> `IN_PROGRESS` -> `IMPLEMENTED` -> `TESTED` -> `REVIEW_PENDING` -> `ACCEPTED` -> `RELEASE_READY`
 
 ## Task Ledger Summary
-- **Current Task**: CC-005 — Production Readiness & Audit Report Export.
-- **Current Lifecycle State**: `READY`
+- **Current Task**: CC-005 — Production Readiness, Audit Report Export & Release Packaging.
+- **Current Lifecycle State**: `IN_PROGRESS`
 - **Current Owner**: Gemini Flash (Lead Engineering Executor).
 - **Independent Reviewer**: EGM Goldfish Codebase Details Auditor (`egm-codebase-details`).
 - **Branch**: main
-- **Last Verified Commit**: cb89c90
+- **Last Verified Commit**: d62c79e
 - **Independent Review Status**: Milestones CC-001, CC-002, CC-003, and CC-004 Certified ACCEPTED; 117/117 tests passing.
 - **Completed Tasks**:
   - CC-001: First End-to-End Vertical Slice (ACCEPTED)
   - CC-002: Interactive Human Review Terminal UI (ACCEPTED)
   - CC-003: Focused Chatwoot Webhook Integration (ACCEPTED)
   - CC-004: Advanced Arabic Dialect Normalization & Fuzzy SKU Resolution (ACCEPTED)
+
+## Verification Criteria for CC-005
+1. **Tamper-Evident Audit Export Engine (`catalog_copilot/audit.py`)**:
+   - Generates auditable export files (CSV/JSON) containing full review history and verification records.
+   - Computes deterministic SHA-256 digests over exported file bytes and cumulative record hash chains.
+   - Generates accompanying cryptographic receipts (`.receipt.json`) containing batch IDs, UTC ISO-8601 timestamps, record counts, file SHA-256, record hashes, and SQLite audit log event hashes.
+   - Provides verification function and CLI command (`catalog-copilot verify-audit`) validating file integrity and cross-referencing against SQLite `audit_log` records.
+2. **Spreadsheet Security & Formula Injection Defense (`catalog_copilot/csv_security.py`)**:
+   - Neutralizes spreadsheet formula injection risks by sanitizing text cells starting with `=`, `+`, `-`, `@`, `\t`, `\r` across all CSV export paths.
+   - Preserves RTL Arabic text, English alphanumeric tokens, and numerical precision.
+3. **Operational Rate Limiting (`catalog_copilot/rate_limiter.py`)**:
+   - Pure standard-library token bucket / sliding window rate limiter.
+   - Configurable limits per channel / sender / client IP to protect persistence layers and outbound channels from flooding.
+4. **CLI Integration & Packaging**:
+   - `catalog-copilot export-audit` and `catalog-copilot verify-audit` subcommands with robust error reporting.
+   - Standalone `INSTALL.md` with complete installation instructions, CLI reference, and operational guide.
+   - Updated `pyproject.toml` and `README.md` with honest documentation of capabilities and limitations (no fictitious legal or cryptographic claims).
+5. **Zero External Dependencies**: Pure Python standard library implementation, no network downloads, no new packages.
+6. **Adversarial & Regression Testing**: 100% test pass rate across new and legacy tests (`python3 -m unittest discover tests`).
+7. **EGM Independent Verification**: Fresh-context independent review by `egm-codebase-details` confirming acceptance criteria without invoking Codex.
 
 ## Verification Criteria for CC-004
 1. **Dialect Normalization Engine (`catalog_copilot/dialect.py`)**:

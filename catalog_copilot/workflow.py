@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import uuid
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from .catalog import CatalogLoader, Catalog
 from .generator import DraftGenerator
 from .verifier import CommercialClaimVerifier
 from .approval import ApprovalLedger, _is_proven_published_for_token
+from .csv_security import sanitize_csv_row
 
 
 class BatchWorkflowEngine:
@@ -191,7 +193,7 @@ class BatchWorkflowEngine:
                 writer = csv.DictWriter(tmp_csv, fieldnames=fieldnames)
                 writer.writeheader()
                 for draft in reserved_drafts:
-                    writer.writerow({
+                    raw_row = {
                         "batch_manifest_id": batch_manifest_id,
                         "draft_id": draft.draft_id,
                         "lead_id": draft.lead_id,
@@ -207,14 +209,20 @@ class BatchWorkflowEngine:
                         "approval_status": draft.approval_status.value,
                         "consent_to_contact": 1 if draft.consent_to_contact else 0,
                         "consent_evidence": draft.consent_evidence,
-                    })
+                    }
+                    writer.writerow(sanitize_csv_row(raw_row))
                 tmp_csv.flush()
                 os.fsync(tmp_csv.fileno())
+
+            # Compute file SHA-256 digest
+            with open(tmp_csv_path, "rb") as f_hash:
+                csv_file_sha256 = hashlib.sha256(f_hash.read()).hexdigest()
 
             # 3. Stage Manifest JSON in temporary file
             manifest_data = {
                 "batch_manifest_id": batch_manifest_id,
                 "export_file": out_p.name,
+                "file_sha256": csv_file_sha256,
                 "record_count": len(draft_ids),
                 "draft_ids": draft_ids,
                 "exported_at": datetime.now(timezone.utc).isoformat(),

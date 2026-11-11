@@ -1,6 +1,6 @@
 """CatalogCopilot — Catalog-grounded Arabic/English sales assistant with commercial claim verification."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .models import (
     CatalogItem,
@@ -39,6 +39,19 @@ from .fuzzy import (
     ResolutionResult,
     FuzzyCatalogMatcher,
 )
+from .csv_security import (
+    sanitize_csv_cell,
+    desanitize_csv_cell,
+    sanitize_csv_row,
+    desanitize_csv_row,
+)
+from .rate_limiter import RateLimiter
+from .audit import (
+    AuditReceipt,
+    AuditExporter,
+    verify_audit_export,
+    AuditVerificationResult,
+)
 
 __all__ = [
     "CatalogItem",
@@ -72,4 +85,13 @@ __all__ = [
     "FuzzyCandidate",
     "ResolutionResult",
     "FuzzyCatalogMatcher",
+    "sanitize_csv_cell",
+    "desanitize_csv_cell",
+    "sanitize_csv_row",
+    "desanitize_csv_row",
+    "RateLimiter",
+    "AuditReceipt",
+    "AuditExporter",
+    "verify_audit_export",
+    "AuditVerificationResult",
 ]
