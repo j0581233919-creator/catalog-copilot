@@ -16,7 +16,7 @@ class TestPackagingAndCLI(unittest.TestCase):
     """Verifies package integrity, metadata consistency, and CLI command execution."""
 
     def test_version_consistency(self):
-        self.assertEqual(catalog_copilot.__version__, "0.2.0")
+        self.assertEqual(catalog_copilot.__version__, "1.0.0")
 
         # Check pyproject.toml matches
         repo_root = Path(__file__).resolve().parent.parent
@@ -26,7 +26,7 @@ class TestPackagingAndCLI(unittest.TestCase):
         with open(pyproject_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        self.assertIn('version = "0.2.0"', content)
+        self.assertIn('version = "1.0.0"', content)
 
     def test_public_api_exports(self):
         expected_symbols = [

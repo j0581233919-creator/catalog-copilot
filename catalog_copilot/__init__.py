@@ -1,6 +1,6 @@
 """CatalogCopilot — Catalog-grounded Arabic/English sales assistant with commercial claim verification."""
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 from .models import (
     CatalogItem,
