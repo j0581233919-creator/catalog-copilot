@@ -16,13 +16,13 @@ CatalogCopilot is a catalog-grounded, bilingual (Arabic/English) sales assistant
 
 ### Development Mode (Editable Install)
 ```bash
-cd "/media/islam/shared pop/GitHub/catalog-copilot/repo"
+cd catalog-copilot
 pip install -e .
 ```
 
 ### Production Install
 ```bash
-cd "/media/islam/shared pop/GitHub/catalog-copilot/repo"
+cd catalog-copilot
 pip install .
 ```
 
