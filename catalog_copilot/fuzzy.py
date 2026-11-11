@@ -38,6 +38,8 @@ _AR_TO_EN_TRANSLITERATION: Dict[str, str] = {
     "ماك بوك": "macbook",
     "ايباد": "ipad",
     "آيباد": "ipad",
+    "تابلت": "tablet",
+    "تاب لت": "tablet",
     "لابتوب": "laptop",
     "لاب توب": "laptop",
     "ديل": "dell",
