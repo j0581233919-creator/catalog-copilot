@@ -95,6 +95,12 @@
   - Independent review receipt: EGM Goldfish Codebase Details Auditor (`egm-codebase-details` subagent `9b202cf9-63f2-4a28-89ee-ba3fe4cafef4`) delivered official **ACCEPTED** verdict recorded in `reviews/EGM_CC005_ACCEPTANCE_VERDICT.md`.
   - CC-005 lifecycle state: **ACCEPTED**.
   - Program lifecycle state for CatalogCopilot: **`RELEASE_READY`**.
+- **2026-11-12T00:20**: Public Release v1.0.0 & Public GitHub Publication:
+  - Repository created: `https://github.com/j0581233919-creator/catalog-copilot`
+  - Release created: `https://github.com/j0581233919-creator/catalog-copilot/releases/tag/v1.0.0`
+  - Release artifact uploaded: `catalog-copilot-v1.0.0.zip` (186,430 bytes, SHA-256 `3da0f7f1b4a3c9c9eff7c947c49f4ab8f5e846a389954363d1b1f5849d6608b6`).
+  - Independent safety gate audit receipt: EGM Goldfish Auditor subagent `cd92aa5e-8472-4c21-97b3-caef36636833` delivered official **ACCEPTED** verdict recorded in `reviews/EGM_RELEASE_GATE_ACCEPTANCE.md`.
+  - Final Lifecycle State: **`PUBLISHED`**.
 
 ---
 
