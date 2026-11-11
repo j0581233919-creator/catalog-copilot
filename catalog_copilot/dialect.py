@@ -445,9 +445,6 @@ def isolate_product_search_tokens(inquiry_text: str) -> str:
     # If everything was stripped, fallback to original inquiry
     return cleaned if cleaned else inquiry_text.strip()
 
-    # If everything was stripped, fallback to original inquiry
-    return cleaned if cleaned else inquiry_text.strip()
-
 
 @dataclass
 class DialectalQueryAnalysis:
