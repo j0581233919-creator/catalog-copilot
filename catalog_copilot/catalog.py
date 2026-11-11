@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
 from .models import CatalogItem
+from .fuzzy import FuzzyCatalogMatcher, FuzzyCandidate, ResolutionResult
 
 # Arabic character normalization mapping
 _ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
@@ -78,6 +79,28 @@ class Catalog:
 
         scored_items.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored_items[:limit]]
+
+    def fuzzy_search(self, query: str, lang: str = "ar", limit: int = 5) -> List[FuzzyCandidate]:
+        """Performs fuzzy matching across catalog items, returning ranked scored candidates."""
+        matcher = FuzzyCatalogMatcher()
+        candidates: List[FuzzyCandidate] = []
+        for item in self._items_by_sku.values():
+            cand = matcher.score_item_against_query(item, query, lang=lang)
+            if cand.score > 0.30:
+                candidates.append(cand)
+        candidates.sort(key=lambda c: c.score, reverse=True)
+        return candidates[:limit]
+
+    def resolve_item_fuzzy(
+        self,
+        query: str,
+        lang: str = "ar",
+        min_confidence: float = 0.72,
+        min_margin: float = 0.12,
+    ) -> ResolutionResult:
+        """Resolves query against catalog items with deterministic fail-closed ambiguity checks."""
+        matcher = FuzzyCatalogMatcher(min_confidence=min_confidence, min_margin=min_margin)
+        return matcher.resolve(list(self._items_by_sku.values()), query, lang=lang)
 
     @property
     def total_count(self) -> int:

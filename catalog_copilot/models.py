@@ -244,6 +244,9 @@ class DraftMessage:
     reviewed_at: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     inquiry_text: str = ""
+    detected_dialect: Optional[str] = None
+    query_intents: List[str] = field(default_factory=list)
+    fuzzy_match_notes: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -265,6 +268,9 @@ class DraftMessage:
             "reviewed_at": self.reviewed_at,
             "created_at": self.created_at,
             "inquiry_text": self.inquiry_text,
+            "detected_dialect": self.detected_dialect,
+            "query_intents": self.query_intents,
+            "fuzzy_match_notes": self.fuzzy_match_notes,
         }
 
     @classmethod
@@ -288,4 +294,7 @@ class DraftMessage:
             reviewed_at=data.get("reviewed_at"),
             created_at=data.get("created_at", ""),
             inquiry_text=data.get("inquiry_text", ""),
+            detected_dialect=data.get("detected_dialect"),
+            query_intents=data.get("query_intents") or [],
+            fuzzy_match_notes=data.get("fuzzy_match_notes"),
         )

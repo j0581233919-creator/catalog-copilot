@@ -177,6 +177,13 @@ class HumanReviewTUI:
         inquiry_display = getattr(draft, "inquiry_text", "") or "(No inquiry text recorded)"
         lines.append(f"{self.fmt.bold('Customer Inquiry:'):<22} \"{inquiry_display}\"")
 
+        # Dialect & Intent Context
+        if getattr(draft, "detected_dialect", None):
+            intents_str = ", ".join(getattr(draft, "query_intents", []) or [])
+            lines.append(f"{self.fmt.bold('Arabic Dialect:'):<22} {draft.detected_dialect} (Intents: {intents_str or 'N/A'})")
+        if getattr(draft, "fuzzy_match_notes", None):
+            lines.append(f"{self.fmt.bold('Resolution Notes:'):<22} {draft.fuzzy_match_notes}")
+
         # Proposed Draft Message
         lines.append(sep_single)
         lines.append(self.fmt.bold(" PROPOSED OUTBOUND DRAFT MESSAGE "))

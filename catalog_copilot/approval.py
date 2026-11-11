@@ -216,6 +216,12 @@ class ApprovalLedger:
                 conn.execute("ALTER TABLE drafts ADD COLUMN reservation_destination TEXT")
             if "inquiry_text" not in existing_columns:
                 conn.execute("ALTER TABLE drafts ADD COLUMN inquiry_text TEXT DEFAULT ''")
+            if "detected_dialect" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN detected_dialect TEXT")
+            if "query_intents" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN query_intents TEXT")
+            if "fuzzy_match_notes" not in existing_columns:
+                conn.execute("ALTER TABLE drafts ADD COLUMN fuzzy_match_notes TEXT")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -311,8 +317,8 @@ class ApprovalLedger:
                     sku, language, subject, body, consent_to_contact, consent_evidence,
                     verification_status, verification_report_json, approval_status,
                     reviewer_notes, reviewed_by, reviewed_at, is_dispatched, created_at,
-                    inquiry_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    inquiry_text, detected_dialect, query_intents, fuzzy_match_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.draft_id,
@@ -335,6 +341,9 @@ class ApprovalLedger:
                     0,
                     draft.created_at,
                     getattr(draft, "inquiry_text", "") or "",
+                    getattr(draft, "detected_dialect", None),
+                    json.dumps(getattr(draft, "query_intents", []) or [], ensure_ascii=False),
+                    getattr(draft, "fuzzy_match_notes", None),
                 ),
             )
             self._log_audit_event(
@@ -1031,6 +1040,15 @@ class ApprovalLedger:
     def _row_to_draft(row: sqlite3.Row) -> DraftMessage:
         report_data = json.loads(row["verification_report_json"])
         report = VerificationReport.from_dict(report_data)
+        row_keys = set(row.keys())
+        query_intents_raw = row["query_intents"] if "query_intents" in row_keys and row["query_intents"] else None
+        query_intents_list = []
+        if query_intents_raw:
+            try:
+                query_intents_list = json.loads(query_intents_raw)
+            except Exception:
+                query_intents_list = [query_intents_raw]
+
         return DraftMessage(
             draft_id=row["draft_id"],
             lead_id=row["lead_id"],
@@ -1049,5 +1067,8 @@ class ApprovalLedger:
             reviewed_by=row["reviewed_by"],
             reviewed_at=row["reviewed_at"],
             created_at=row["created_at"],
-            inquiry_text=row["inquiry_text"] if "inquiry_text" in row.keys() and row["inquiry_text"] else "",
+            inquiry_text=row["inquiry_text"] if "inquiry_text" in row_keys and row["inquiry_text"] else "",
+            detected_dialect=row["detected_dialect"] if "detected_dialect" in row_keys else None,
+            query_intents=query_intents_list,
+            fuzzy_match_notes=row["fuzzy_match_notes"] if "fuzzy_match_notes" in row_keys else None,
         )

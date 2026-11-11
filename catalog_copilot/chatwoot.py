@@ -41,6 +41,11 @@ class MockChatwootTransport:
     def __init__(self):
         self.sent_messages: List[Dict[str, Any]] = []
 
+    @property
+    def calls(self) -> List[Dict[str, Any]]:
+        """Alias for sent_messages for test assertions."""
+        return self.sent_messages
+
     def __call__(
         self,
         method: str,
@@ -483,12 +488,21 @@ class ChatwootWebhookHandler:
             f"• **Target SKU**: `{sku_val}`",
             f"• **Verification**: `{status_val}`",
             f"• **Consent**: {consent_badge}",
+        ]
+
+        if getattr(draft, "detected_dialect", None):
+            intents_str = ", ".join(getattr(draft, "query_intents", []) or [])
+            lines.append(f"• **Dialect**: `{draft.detected_dialect}` ({intents_str or 'N/A'})")
+        if getattr(draft, "fuzzy_match_notes", None):
+            lines.append(f"• **Resolution**: {draft.fuzzy_match_notes}")
+
+        lines.extend([
             "",
             "**Proposed Customer Reply:**",
             "```",
             draft.body,
             "```",
-        ]
+        ])
 
         if draft.verification_report.reasons:
             lines.append("**Detected Issues / Guardrail Violations:**")

@@ -83,6 +83,7 @@ class CommercialClaimVerifier:
         "ready", "happy", "pleased", "glad", "not", "only", "special",
         "deal", "request", "help", "here", "as", "be", "been", "was", "were",
         "our", "these", "those", "will", "shall", "should", "may", "might",
+        "found", "multiple", "matching", "products", "in", "catalog", "which", "clarify", "clarification", "options", "found",
     }
 
     _TRANSACTIONAL_WORDS_AR = {
@@ -105,6 +106,8 @@ class CommercialClaimVerifier:
         "نود", "إفادتكم", "افادتكم", "بأن", "بان", "المطلوب", "مطلوب", "أسعار",
         "الأسعار", "بالأسعار", "بالاسعار", "تزويدكم", "أن", "إن", "كان", "كانت",
         "يكون", "تكون",
+        "وجدنا", "اكثر", "أكثر", "مطابق", "متجرنا", "تحديد", "خيارات", "إفادتكم",
+        "بالسعر", "الرسمي", "بين", "المنتجات", "توضيح", "المطلوبة",
     }
 
     # Normalized currency mapping
@@ -128,7 +131,8 @@ class CommercialClaimVerifier:
 
     _INTERROGATIVE_STARTERS_AR = re.compile(
         r"^(?:"
-        r"هل|[أإا]|ما|ماذا|من|متى|[أإا]ين|كيف|كم|[أإا]ي|[أإا]يها|[أإا]ينما|لماذا|لم|"
+        r"هل|[أإا]|ما|ماذا|من|متى|[أإا]ين|كيف|كم|بكام|بكم|قديش|[أإا]ديش|شو|وش|[أإا]يش|[أإا]ي|[أإا]يها|[أإا]ينما|لماذا|لم|"
+        r"عامل\s+كام|(?:عايز|عاوز|بدي|ابغى|أبغى|ابي|أبي|ممكن|حابب)\s+اعرف(?:\s+(?:بكام|بكم|قديش|كم|شو|وش|ايش))?|"
         r"هل\s+صحيح|هل\s+من\s+الممكن|هل\s+يمكن|[أإا]يمكن|هل\s+تتوفر|هل\s+يوجد|هل\s+يتوفر|[أإا]رجو\s+توضيح|هل\s+بالإمكان"
         r")(?:\s+|$)",
     )
@@ -165,6 +169,9 @@ class CommercialClaimVerifier:
         "قطعة", "قطع", "حبة", "حبات", "وحدة", "وحدات",
         "ريال", "درهم", "جنيه", "دولار", "يورو", "باوند",
         "مرحبا", "مرحباً", "أهلاً", "اهلا", "وسهلاً", "وسهلا", "شكرا", "شكراً", "لو", "سمحت", "من", "فضلك",
+        "عايز", "عاوز", "عاوزه", "عايزه", "بدي", "ابغى", "أبغى", "ابي", "أبي", "اعرف", "اسأل", "اسال", "استفسر",
+        "بكام", "قديش", "أديش", "اديش", "شو", "وش", "ايش", "ده", "دي", "دول", "ذا", "ذي", "ذول",
+        "هيدا", "هادا", "هيدي", "هدول", "هلأ", "هلق", "الحين", "يا", "فندم", "باشا",
         "في", "من", "إلى", "على", "عن", "مع", "بـ", "لـ", "كـ",
     }
 
@@ -183,7 +190,7 @@ class CommercialClaimVerifier:
 
     _CLAUSAL_CONNECTIVES_AR = re.compile(
         r"\b(?:"
-        r"إذا|اذا|لو|إن|ان|لولا|طالما|"
+        r"إذا|اذا|لو(?![\s]+(?:سمحت|بتريد))|إن|ان|لولا|طالما|"
         r"بعد|بعدما|بعد\s+أن|قبل|قبلما|قبل\s+أن|حين|حينما|عند|عندما|وقت|وقتما|منذ|حتى|إلى\s+أن|الى\s+أن|"
         r"لأن|لان|بسبب|كون|لكون|نظرا|نظراً|نظرا\s+لأن|نظراً\s+لأن|حيث|حيث\s+أن|حيثما|إذ|اذ|إذ\s+أن|اذ\s+أن|"
         r"مع\s+أن|مع\s+ان|رغم|رغم\s+أن|رغم\s+ان|بالرغم\s+من|غير\s+أن|غير\s+ان|إلا\s+أن|الا\s+أن|"
@@ -628,6 +635,13 @@ class CommercialClaimVerifier:
             catalog_raw = f"{catalog_item.sku} {catalog_item.title_en} {catalog_item.title_ar} {catalog_item.category} {catalog_item.offer_description_en or ''} {catalog_item.offer_description_ar or ''}"
             allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", catalog_raw))
             allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", catalog_raw))
+        else:
+            # Check for any valid catalog items explicitly referenced in the draft (e.g. multi-candidate clarification drafts)
+            for item in catalog.list_items():
+                if item.sku in draft_text.upper():
+                    catalog_raw = f"{item.sku} {item.title_en} {item.title_ar} {item.category} {item.offer_description_en or ''} {item.offer_description_ar or ''}"
+                    allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", catalog_raw))
+                    allowed_tokens.update(normalize_arabic_text(t) for t in re.findall(r"[\u0621-\u064A]+", catalog_raw))
 
         if lead.customer_name:
             allowed_tokens.update(t.lower() for t in re.findall(r"[\w\-]+", lead.customer_name))

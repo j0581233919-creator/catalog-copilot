@@ -24,6 +24,21 @@ from .chatwoot import (
     MockChatwootTransport,
     create_chatwoot_server,
 )
+from .dialect import (
+    ArabicDialect,
+    QueryIntent,
+    DialectalQueryAnalysis,
+    parse_dialectal_inquiry,
+    detect_arabic_dialect,
+    clean_elongation,
+    isolate_product_search_tokens,
+)
+from .fuzzy import (
+    MatchType,
+    FuzzyCandidate,
+    ResolutionResult,
+    FuzzyCatalogMatcher,
+)
 
 __all__ = [
     "CatalogItem",
@@ -46,4 +61,15 @@ __all__ = [
     "ChatwootWebhookHandler",
     "MockChatwootTransport",
     "create_chatwoot_server",
+    "ArabicDialect",
+    "QueryIntent",
+    "DialectalQueryAnalysis",
+    "parse_dialectal_inquiry",
+    "detect_arabic_dialect",
+    "clean_elongation",
+    "isolate_product_search_tokens",
+    "MatchType",
+    "FuzzyCandidate",
+    "ResolutionResult",
+    "FuzzyCatalogMatcher",
 ]
